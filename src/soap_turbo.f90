@@ -79,6 +79,10 @@ module soap_turbo_desc
   complex(c_double_complex), allocatable, target :: angular_exp_coeff(:,:), cnk(:,:,:)
   complex(c_double_complex), allocatable, target :: angular_exp_coeff_rad_der(:,:), angular_exp_coeff_azi_der(:,:)
   complex(c_double_complex), allocatable, target :: cnk_azi_der(:,:,:), cnk_rad_der(:,:,:), cnk_pol_der(:,:,:)
+! Debug dump of cnk_rad_der (see TURBOGAP_DUMP_CNK below)
+  complex(c_double_complex), allocatable, target :: cnk_rad_der_dump(:,:,:)
+  character(len=32) :: dump_env
+  integer :: dump_len
   complex(c_double_complex), allocatable, target :: angular_exp_coeff_pol_der(:,:)
   complex(c_double_complex), allocatable, target :: eimphi(:), prefm(:), eimphi_rad_der(:)
 
@@ -699,7 +703,31 @@ time1 = MPI_wtime()
           cnk_rad_der_d, cnk_azi_der_d, cnk_pol_der_d, &
           rjs_d, &
           rcut_max, &
-          n_atom_pairs, n_sites,  n_soap, k_max, n_max, l_max, gpu_stream) 
+          n_atom_pairs, n_sites,  n_soap, k_max, n_max, l_max, gpu_stream)
+
+!    Debug: dump cnk_rad_der so it can be diffed against the CPU reference.
+!    Enabled by setting TURBOGAP_DUMP_CNK; off by default.
+!    The device buffer is laid out as (n_atom_pairs, k_max, n_max), i.e. the
+!    transpose of the host cnk_rad_der(k_max, n_max, n_atom_pairs), so it is
+!    received into a matching temporary and written in (k2, n, k) order.
+     call get_environment_variable( "TURBOGAP_DUMP_CNK", dump_env, dump_len )
+     if( dump_len > 0 )then
+       allocate( cnk_rad_der_dump(1:n_atom_pairs, 1:k_max, 1:n_max) )
+       call cpy_dtoh(cnk_rad_der_d, c_loc(cnk_rad_der_dump), st_cnk_rap_der, gpu_stream)
+       call gpu_stream_sync( gpu_stream )
+       open(unit=77, file="cnk_rad_der_gpu.dat", status="unknown")
+       write(77,'(A,3I8)') "# n_atom_pairs k_max n_max ", n_atom_pairs, k_max, n_max
+       do k2 = 1, min(20, n_atom_pairs)
+         do n = 1, n_max
+           do k = 1, k_max
+             write(77,'(3I6,1X,ES14.6,2ES26.16)') k2, n, k, rjs(k2), &
+               dble(cnk_rad_der_dump(k2,k,n)), dimag(cnk_rad_der_dump(k2,k,n))
+           end do
+         end do
+       end do
+       close(77)
+       deallocate( cnk_rad_der_dump )
+     end if
 
   end if
 
