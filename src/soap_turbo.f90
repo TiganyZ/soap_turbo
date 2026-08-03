@@ -392,6 +392,9 @@ time2 = MPI_wtime()
 
   allocate( sqrt_dot_p(1:n_sites) )
 
+! soap_d is allocated by the caller as n_soap*n_sites doubles; st_soap must
+! match that allocation or the memset below runs past the end of the buffer.
+  st_soap=n_soap*n_sites*sizeof(soap(1,1))
   st_soap_rap_der=n_soap*n_atom_pairs*sizeof(soap_rad_der(1,1))
   st_n_atom_pairs_int=n_atom_pairs*sizeof(k3_index(1))
   st_n_sites_int=n_sites*sizeof(n_neigh(1))
@@ -837,10 +840,10 @@ time1 = MPI_wtime()
 ! This is for debugging
  if( .false. )then
     
-    call cpy_dtoh(soap_rad_der_d, c_loc(soap_rad_der),st_soap, gpu_stream)
-    call cpy_dtoh(soap_azi_der_d, c_loc(soap_azi_der),st_soap, gpu_stream)
-    call cpy_dtoh(soap_pol_der_d, c_loc(soap_pol_der),st_soap, gpu_stream)
-    call cpy_dtoh(sqrt_dot_p_d, c_loc(sqrt_dot_p), st_soap, gpu_stream) ! blocking or asynchronous?
+    call cpy_dtoh(soap_rad_der_d, c_loc(soap_rad_der),st_soap_rap_der, gpu_stream)
+    call cpy_dtoh(soap_azi_der_d, c_loc(soap_azi_der),st_soap_rap_der, gpu_stream)
+    call cpy_dtoh(soap_pol_der_d, c_loc(soap_pol_der),st_soap_rap_der, gpu_stream)
+    call cpy_dtoh(sqrt_dot_p_d, c_loc(sqrt_dot_p), st_n_sites_double, gpu_stream) ! blocking or asynchronous?
 
    open(unit=10, file="gpu_soap_desc.dat", status="unknown")
 
