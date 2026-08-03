@@ -81,6 +81,8 @@ module soap_turbo_desc
   complex(c_double_complex), allocatable, target :: cnk_azi_der(:,:,:), cnk_rad_der(:,:,:), cnk_pol_der(:,:,:)
 ! Debug dump of cnk_rad_der (see TURBOGAP_DUMP_CNK below)
   complex(c_double_complex), allocatable, target :: cnk_rad_der_dump(:,:,:)
+  real(c_double), allocatable, target :: rad_exp_der_dump(:,:)
+  complex(c_double_complex), allocatable, target :: ang_rad_der_dump(:,:)
   character(len=32) :: dump_env
   integer :: dump_len
   complex(c_double_complex), allocatable, target :: angular_exp_coeff_pol_der(:,:)
@@ -727,6 +729,39 @@ time1 = MPI_wtime()
        end do
        close(77)
        deallocate( cnk_rad_der_dump )
+
+!      The two inputs cnk_rad_der is built from. radial_exp_coeff_der_d has
+!      the same (n_max, n_atom_pairs) layout as the host array, whereas
+!      angular_exp_coeff_rad_der_d is stored transposed as
+!      (n_atom_pairs, k_max), so each is received into a matching temporary.
+       allocate( rad_exp_der_dump(1:n_max, 1:n_atom_pairs) )
+       call cpy_dtoh(radial_exp_coeff_der_d, c_loc(rad_exp_der_dump), &
+                     st_rad_exp_coeff_der_double, gpu_stream)
+       allocate( ang_rad_der_dump(1:n_atom_pairs, 1:k_max) )
+       call cpy_dtoh(angular_exp_coeff_rad_der_d, c_loc(ang_rad_der_dump), &
+                     st_ang_exp_coeff_rad_der, gpu_stream)
+       call gpu_stream_sync( gpu_stream )
+
+       open(unit=77, file="radial_exp_coeff_der_gpu.dat", status="unknown")
+       write(77,'(A,3I8)') "# n_atom_pairs n_max ", n_atom_pairs, n_max
+       do k2 = 1, min(20, n_atom_pairs)
+         do n = 1, n_max
+           write(77,'(2I6,1X,ES14.6,ES26.16)') k2, n, rjs(k2), rad_exp_der_dump(n,k2)
+         end do
+       end do
+       close(77)
+
+       open(unit=77, file="angular_exp_coeff_rad_der_gpu.dat", status="unknown")
+       write(77,'(A,3I8)') "# n_atom_pairs k_max ", n_atom_pairs, k_max
+       do k2 = 1, min(20, n_atom_pairs)
+         do k = 1, k_max
+           write(77,'(2I6,1X,ES14.6,2ES26.16)') k2, k, rjs(k2), &
+             dble(ang_rad_der_dump(k2,k)), dimag(ang_rad_der_dump(k2,k))
+         end do
+       end do
+       close(77)
+
+       deallocate( rad_exp_der_dump, ang_rad_der_dump )
      end if
 
   end if
