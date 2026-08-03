@@ -498,7 +498,6 @@ module soap_turbo_angular
     integer(c_size_t) :: st_prefl_array_global
 
 
-    print *, "start ang coeff"
     
     c_do_derivatives=logical( .false., kind=c_bool ) 
     if(do_derivatives) then 
@@ -573,7 +572,6 @@ module soap_turbo_angular
     call gpu_free_async(eimphi_global_d,gpu_stream)
     call gpu_free_async(prefl_array_global_d,gpu_stream)
 
-    print *, "Finished ang coeff"
     return 
   end subroutine get_angular_expansion_coefficients
 !**************************************************************************

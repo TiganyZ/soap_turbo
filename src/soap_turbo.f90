@@ -173,7 +173,11 @@ module soap_turbo_desc
 
 
   if( do_timing )then
+#ifdef _MPIF90    
+ time3 = MPI_wtime() 
+#else
      call cpu_time(time3)
+#endif          
   end if
 
 !-------------------
@@ -184,7 +188,11 @@ module soap_turbo_desc
 
 
   if( do_timing )then
+#ifdef _MPIF90    
+    time1 = MPI_wtime()
+#else
     call cpu_time(time1)
+#endif
   end if
 
 ! Check if we need to expand the central atom
@@ -240,7 +248,11 @@ module soap_turbo_desc
   end if
 
   if( do_timing )then
+#ifdef _MPIF90    
+    time2 = MPI_wtime()
+#else
     call cpu_time(time2)
+#endif
     memory_time = time2 - time1
     time1 = time2
   end if
@@ -313,12 +325,15 @@ module soap_turbo_desc
 
 
   if( do_timing )then
+#ifdef _MPIF90    
+    time2 = MPI_wtime()
+#else
     call cpu_time(time2)
+#endif    
     basis_time = time2 - time1
   end if
 
   ! This is for the expansion coefficients and the soap vectors
-                write(*,*)  "alloc radial exp coeff "
   allocate( radial_exp_coeff(1:n_max, 1:n_atom_pairs) )
   allocate( angular_exp_coeff(1:k_max, 1:n_atom_pairs) )
   allocate( cnk( 1:k_max, 1:n_max, 1:n_sites) )
@@ -333,7 +348,11 @@ module soap_turbo_desc
   skip_soap_component = .false.
   if( compress_soap )then
      if( do_timing )then
+#ifdef _MPIF90       
+        time1 = MPI_wtime()
+#else        
         call cpu_time(time1)
+#endif
      end if
      n_soap = size(compress_soap_indices)
      skip_soap_component = .true.
@@ -352,7 +371,11 @@ module soap_turbo_desc
         end do
      end do
      if( do_timing )then
+#ifdef _MPIF90
+time2 = MPI_wtime()
+#else        
         call cpu_time(time2)
+#endif
         compress_time = time2 - time1
      end if
   else
@@ -360,7 +383,11 @@ module soap_turbo_desc
   end if
 
   if( do_timing )then
+#ifdef _MPIF90
+ time1 = MPI_wtime()
+#else
      call cpu_time(time1)
+#endif
   end if
 
   allocate( sqrt_dot_p(1:n_sites) )
@@ -401,9 +428,12 @@ module soap_turbo_desc
   end if
 
   
-  !write(*,*) n_sites, n_atom_pairs
   if( do_timing )then
+#ifdef _MPIF90
+ time2 = MPI_wtime()
+#else
     call cpu_time(time2)
+#endif
     memory_time = memory_time + time2 - time1
     time1 = time2
   end if
@@ -411,11 +441,6 @@ module soap_turbo_desc
   ! 18.6
   !call cpu_time(ttt(1))
 
-  ! write(*,*)
-  ! write(*,*) 
-  ! write(*,*)
-  ! write(*,*) alpha_max
-  ! stop
 
   allocate(k_idx(1:n_sites))
   k_idx(1) = 0
@@ -534,7 +559,11 @@ module soap_turbo_desc
   call cpy_htod(c_loc(k2_i_site),k2_i_site_d, st_n_atom_pairs_int, gpu_stream)
   
   if( do_timing )then
+#ifdef _MPIF90
+    time2 = MPI_wtime()
+#else
     call cpu_time(time2)
+#endif
     radial_time = time2 - time1
     time1 = time2
   end if
@@ -599,13 +628,21 @@ module soap_turbo_desc
          gpu_stream)
 
   if( do_timing )then
+#ifdef _MPIF90
+    time2 = MPI_wtime() 
+#else
     call cpu_time(time2)
+#endif
     angular_time = time2 - time1
   end if
 
 
   if( do_timing )then
+#ifdef _MPIF90
+time1 = MPI_wtime() 
+#else
     call cpu_time(time1)
+#endif
   end if
  
   
@@ -664,13 +701,21 @@ module soap_turbo_desc
   end if
 
   if( do_timing )then
+#ifdef _MPIF90
+time2 = MPI_wtime() 
+#else
     call cpu_time(time2)
+#endif
     coeff_time = time2 - time1
   end if
 
   
   if( do_timing )then
+#ifdef _MPIF90
+time1 = MPI_wtime() 
+#else
     call cpu_time(time1)
+#endif
   end if
 
 ! Create the multiplicity array
@@ -890,7 +935,11 @@ module soap_turbo_desc
   end if
 
   if( do_timing )then
+#ifdef _MPIF90
+time2 = MPI_wtime() 
+#else
     call cpu_time(time2)
+#endif
     soap_time = time2-time1
     total_time = time2 - time3
     write(*,*)'                                       |'
@@ -940,7 +989,6 @@ module soap_turbo_desc
   ttt(2)=MPI_Wtime()
   time_get_soap=time_get_soap+ttt(2)-ttt(1)
 
-    write(*,*)  "finished get soap "
   end subroutine get_soap
 !**************************************************************************
 
