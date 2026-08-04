@@ -1050,7 +1050,7 @@ time2 = MPI_wtime()
   call gpu_free_async(i_end_d,gpu_stream)
   call gpu_free_async(skip_soap_component_d,gpu_stream)
   call gpu_free_async(sqrt_dot_p_d,gpu_stream)
-  call gpu_free(cnk_d)
+  call gpu_free_async(cnk_d, gpu_stream)
 
   ttt(2)=MPI_Wtime()
   time_get_soap=time_get_soap+ttt(2)-ttt(1)
