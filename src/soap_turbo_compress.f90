@@ -25,6 +25,19 @@
 
 module soap_turbo_compress_module
 
+! Kind parameters, declared locally on purpose: soap_turbo is a submodule with
+! its own upstream and must not depend on the parent tree's kinds module.
+  use, intrinsic :: iso_fortran_env, only: real32, real64, int32, int64
+
+
+
+! private so a module that uses another does not inherit a second copy
+  integer, parameter, private :: sp  = real32
+  integer, parameter, private :: dp  = real64
+  integer, parameter, private :: i32 = int32
+  integer, parameter, private :: i64 = int64
+  private :: real32, real64, int32, int64
+
   contains
 
 !**************************************************************************
@@ -37,14 +50,14 @@ module soap_turbo_compress_module
   character(*), intent(in) :: compress_mode, what_to_do
 
 ! Input-Output variables
-  real*8, intent(inout) :: P_el(:)
+  real(dp), intent(inout) :: P_el(:)
   integer, intent(inout) :: dim, P_nonzero, P_i(:), P_j(:)
 
 ! Internal variables
   integer, allocatable :: pivot(:)
   integer :: n_species, n_max, i, counter, n, m, l, k
   logical :: set_indices
-  real*8 :: f
+  real(dp) :: f
   integer, allocatable :: ns(:,:), dense_to_sparse(:,:)
   integer :: nu_R, nu_S, N1, N2, S1, S2, n_compressed, n_uncompressed, n_1, n_2, alpha, beta, z1, z2, &
              a1, i_c, j, j_c, a2, ind, comp_ind, i_temp, alpha_2, beta_2, z1_2, z2_2, n_1_2, n_2_2, &
