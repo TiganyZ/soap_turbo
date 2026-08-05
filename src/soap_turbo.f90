@@ -25,11 +25,24 @@
 
 module soap_turbo_desc
 
+! Kind parameters, declared locally on purpose: soap_turbo is a submodule with
+! its own upstream and must not depend on the parent tree's kinds module.
+  use, intrinsic :: iso_fortran_env, only: real32, real64, int32, int64
+
+
   use soap_turbo_radial
   use soap_turbo_angular
   use F_B_C
   use iso_c_binding
   use mpi
+
+! private so a module that uses another does not inherit a second copy
+  integer, parameter, private :: sp  = real32
+  integer, parameter, private :: dp  = real64
+  integer, parameter, private :: i32 = int32
+  integer, parameter, private :: i64 = int64
+  private :: real32, real64, int32, int64
+
 
   contains
 
@@ -51,8 +64,8 @@ module soap_turbo_desc
 
 !-------------------
 ! Input variables
-!  real*8, intent(inout) :: time_misca,time_get_rad, time_get_ang, time_get_cart
-!  real*8 :: tt_misca(2)=0.0,tt_rad(2)=0.0,tt_ang(2)=0.0,tt_cart(2)=0.0
+!  real(dp), intent(inout) :: time_misca,time_get_rad, time_get_ang, time_get_cart
+!  real(dp) :: tt_misca(2)=0.0,tt_rad(2)=0.0,tt_ang(2)=0.0,tt_cart(2)=0.0
   real(c_double), intent(in), target :: rjs(:), thetas(:), phis(:)
   real(c_double), intent(in), target :: central_weight(:), atom_sigma_r(:)
   real(c_double), intent(in), target :: rcut_hard(:)
@@ -91,12 +104,12 @@ module soap_turbo_desc
   real(c_double), allocatable,target :: W(:,:), S(:,:), multiplicity_array(:) 
 !  real(c_double), allocatable,target ::W_check(:,:), S_check(:,:)
   real(c_double), allocatable,target :: soap_rad_der(:,:), sqrt_dot_p(:), soap_azi_der(:,:)
-  real*8, allocatable :: W_temp(:,:), S_temp(:,:)
+  real(dp), allocatable :: W_temp(:,:), S_temp(:,:)
   real(c_double), allocatable,target :: radial_exp_coeff(:,:), soap_pol_der(:,:)
-  real*8, allocatable, target :: preflm(:), plm_array(:), prefl(:), fact_array(:), prefl_rad_der(:)
+  real(dp), allocatable, target :: preflm(:), plm_array(:), prefl(:), fact_array(:), prefl_rad_der(:)
   real(c_double), allocatable,target :: radial_exp_coeff_der(:,:)
-  real*8 :: amplitude, multiplicity, pi, rcut_max
-  real*8 :: radial_time, angular_time, coeff_time, time3, total_time, soap_time, time1, time2, compress_time, &
+  real(dp) :: amplitude, multiplicity, pi, rcut_max
+  real(dp) :: radial_time, angular_time, coeff_time, time3, total_time, soap_time, time1, time2, compress_time, &
             memory_time, basis_time
 
   integer(c_int), allocatable, target :: i_beg(:), i_end(:)
@@ -113,8 +126,8 @@ module soap_turbo_desc
   type(c_ptr) :: cnk_d, sqrt_dot_p_d
   type(c_ptr), intent(inout) :: multiplicity_array_d, W_d, S_d !! NOTE CHANGING FROM SAVE BEHAVIOUR, ALWAYS RECOMPUTE BASIS ON GPU 
   type(c_ptr) :: skip_soap_component_d
-  real*8 :: ttt(2)=0.d0
-  real*8, intent(inout) :: time_get_soap
+  real(dp) :: ttt(2)=0.d0
+  real(dp), intent(inout) :: time_get_soap
   integer :: maxneigh
   type(c_ptr) ::  thetas_d,phis_d,rjs_d
   type(c_ptr) ::  k2_i_site_d
@@ -239,7 +252,7 @@ module soap_turbo_desc
   allocate( eimphi(1:k_max) )
   allocate( prefl(0:l_max) ) 
   allocate( prefm(0:l_max) )
-  allocate( fact_array(1:l_max) ) !real*8
+  allocate( fact_array(1:l_max) ) !real(dp)
 
   call get_preflm(preflm, l_max)
 
@@ -249,8 +262,8 @@ module soap_turbo_desc
   call cpy_htod( c_loc(preflm), preflm_d, st_size_preflm, gpu_stream)
 
   if( do_derivatives )then
-    allocate( prefl_rad_der(0:l_max) ) ! real*8
-    allocate( eimphi_rad_der(1:k_max) ) ! complex*16
+    allocate( prefl_rad_der(0:l_max) ) ! real(dp)
+    allocate( eimphi_rad_der(1:k_max) ) ! complex(dp)
   end if
 
   if( do_timing )then
@@ -1075,13 +1088,13 @@ time2 = MPI_wtime()
 
     implicit none
 
-    real*8, intent(in) :: radial_exp_coeff(:,:), radial_exp_coeff_der(:,:), rjs(:), cutoff
-    complex*16, intent(in) :: angular_exp_coeff(:,:)
-    complex*16 :: angular_exp_coeff_rad_der(:,:), angular_exp_coeff_azi_der(:,:), angular_exp_coeff_pol_der(:,:)
-    complex*16, intent(out) :: cnk_rad_der(:,:,:), cnk_azi_der(:,:,:), cnk_pol_der(:,:,:)
+    real(dp), intent(in) :: radial_exp_coeff(:,:), radial_exp_coeff_der(:,:), rjs(:), cutoff
+    complex(dp), intent(in) :: angular_exp_coeff(:,:)
+    complex(dp) :: angular_exp_coeff_rad_der(:,:), angular_exp_coeff_azi_der(:,:), angular_exp_coeff_pol_der(:,:)
+    complex(dp), intent(out) :: cnk_rad_der(:,:,:), cnk_azi_der(:,:,:), cnk_pol_der(:,:,:)
     integer, intent(in) :: n_sites, n_max, l_max, n_neigh(:)
     integer :: k2, i, j, n, m, k, l
-    real*8 :: pi
+    real(dp) :: pi
 
     pi = dacos(-1.d0)
 

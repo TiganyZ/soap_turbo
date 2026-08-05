@@ -26,8 +26,21 @@
 
 module soap_turbo_radial
 
+! Kind parameters, declared locally on purpose: soap_turbo is a submodule with
+! its own upstream and must not depend on the parent tree's kinds module.
+  use, intrinsic :: iso_fortran_env, only: real32, real64, int32, int64
+
+
   use soap_turbo_functions
   use iso_c_binding
+
+! private so a module that uses another does not inherit a second copy
+  integer, parameter, private :: sp  = real32
+  integer, parameter, private :: dp  = real64
+  integer, parameter, private :: i32 = int32
+  integer, parameter, private :: i64 = int64
+  private :: real32, real64, int32, int64
+
 
   contains
 
@@ -40,7 +53,7 @@ module soap_turbo_radial
     implicit none
 
     integer :: a, b
-    real*8 :: rcut, N_a
+    real(dp) :: rcut, N_a
 
     b = 2*a + 5
 
@@ -81,23 +94,23 @@ module soap_turbo_radial
     implicit none
 
     integer, intent(in) :: alpha_max, n_neigh(:), n_sites, radial_enhancement
-    real*8, intent(in) :: rcut_soft_in,  rjs_in(:), atom_sigma_in, nf, atom_sigma_scaling
-    real*8, intent(in) :: amplitude_scaling, central_weight
-    real*8 :: rcut_soft, rcut_hard, atom_sigma, atom_sigma_scaled, amplitude
+    real(dp), intent(in) :: rcut_soft_in,  rjs_in(:), atom_sigma_in, nf, atom_sigma_scaling
+    real(dp), intent(in) :: amplitude_scaling, central_weight
+    real(dp) :: rcut_soft, rcut_hard, atom_sigma, atom_sigma_scaled, amplitude
     logical, intent(in) :: mask(:), do_derivatives, do_central
     character(*), intent(in) :: scaling_mode
     real(c_double),intent(in) :: rcut_hard_in
 !
     integer :: n, i, j, k, alpha_max_der
-    real*8 :: I_n, I_np1, I_np2, pi, sq2, rj, N_n, N_np1, N_np2, C1, C2, dr, s2, sf2
-    real*8 :: W(:,:)
-    real*8 :: atom_sigma_f, rj_f
+    real(dp) :: I_n, I_np1, I_np2, pi, sq2, rj, N_n, N_np1, N_np2, C1, C2, dr, s2, sf2
+    real(dp) :: W(:,:)
+    real(dp) :: atom_sigma_f, rj_f
 !   Results will be stored in exp_coeff, which is an array of dimension
 !   (alpha_max, n_atom_pairs)
     real(c_double),intent(inout), target :: exp_coeff(:,:), exp_coeff_der(:,:)
-    real*8, allocatable :: exp_coeff_temp1(:), exp_coeff_temp2(:), exp_coeff_der_temp(:)
+    real(dp), allocatable :: exp_coeff_temp1(:), exp_coeff_temp2(:), exp_coeff_der_temp(:)
     logical, save :: print_basis = .false.
-    real*8 :: denom, der_sjf_rj, der_rjf_rj, amplitude_der, pref_f, der_pref_f
+    real(dp) :: denom, der_sjf_rj, der_rjf_rj, amplitude_der, pref_f, der_pref_f
 
 !   If the user requests derivatives, we need to get the expansion coefficients up to
 !   alpha_max + 2
@@ -393,23 +406,23 @@ module soap_turbo_radial
     implicit none
 
     integer, intent(in) :: alpha_max, n_neigh(:), n_sites, radial_enhancement
-    real*8, intent(in) :: rcut_soft_in,rjs_in(:), atom_sigma_in, nf, atom_sigma_scaling
-    real*8, intent(in) :: amplitude_scaling
-    real*8 :: rcut_soft, rcut_hard, atom_sigma, atom_sigma_scaled, ampli_tude
+    real(dp), intent(in) :: rcut_soft_in,rjs_in(:), atom_sigma_in, nf, atom_sigma_scaling
+    real(dp), intent(in) :: amplitude_scaling
+    real(dp) :: rcut_soft, rcut_hard, atom_sigma, atom_sigma_scaled, ampli_tude
     logical, intent(in) :: mask(:), do_derivatives
     character(*), intent(in) :: scaling_mode
     real(c_double), intent(in) ::  rcut_hard_in
 !
     integer :: n, i, j, k, alpha_max_der, kij
-    real*8 :: I_n, I_np1, I_np2, pi, sq2, rj, N_n, N_np1, N_np2, C1, C2, dr, s2, sf2
-    real*8 :: W(:,:)
-    real*8 :: atom_sigma_f, rj_f, N_gauss
+    real(dp) :: I_n, I_np1, I_np2, pi, sq2, rj, N_n, N_np1, N_np2, C1, C2, dr, s2, sf2
+    real(dp) :: W(:,:)
+    real(dp) :: atom_sigma_f, rj_f, N_gauss
 !   Results will be stored in exp_coeff, which is an array of dimension
 !   (n_sites, n_neigh_max, alpha_max)
     real(c_double),intent(inout), target :: exp_coeff(:,:), exp_coeff_der(:,:)
-    real*8, allocatable :: exp_coeff_temp1(:), exp_coeff_temp2(:), exp_coeff_der_temp(:)
+    real(dp), allocatable :: exp_coeff_temp1(:), exp_coeff_temp2(:), exp_coeff_der_temp(:)
     logical, save :: print_basis = .false.
-    real*8 :: denom, der_sjf_rj, der_rjf_rj, ampli_tude_der, pref_f, der_pref_f, sigma_star
+    real(dp) :: denom, der_sjf_rj, der_rjf_rj, ampli_tude_der, pref_f, der_pref_f, sigma_star
     integer(c_int), intent(in), target :: k_idx(:)
     !real(c_double),allocatable, target :: amplitude_save(:),  amplitude_der_save(:)
     !integer :: n_atom_pairs
@@ -762,8 +775,8 @@ module soap_turbo_radial
     implicit none
 
     integer :: alpha_max, i, j, info
-    real*8, intent(inout) :: W(:,:), S(:,:)
-    real*8, allocatable :: Sb(:,:), U(:,:), VT(:,:), svd(:), work(:)
+    real(dp), intent(inout) :: W(:,:), S(:,:)
+    real(dp), allocatable :: Sb(:,:), U(:,:), VT(:,:), svd(:), work(:)
     integer, allocatable :: ipiv(:)
     logical :: stable_basis = .true.
 
@@ -849,10 +862,10 @@ module soap_turbo_radial
     implicit none
 
     integer :: alpha_max, i, j, info, n
-    real*8, intent(inout) :: W(:,:), S(:,:)
-    real*8, allocatable :: Sb(:,:), U(:,:), VT(:,:), svd(:), work(:)
-    real*8 :: s2, I_n, N_n, N_np1, I_np1, N_np2, I_np2, C2, sq2, pi, atom_sigma, rcut_hard
-    real*8, intent(in) :: rcut_hard_in, atom_sigma_in
+    real(dp), intent(inout) :: W(:,:), S(:,:)
+    real(dp), allocatable :: Sb(:,:), U(:,:), VT(:,:), svd(:), work(:)
+    real(dp) :: s2, I_n, N_n, N_np1, I_np1, N_np2, I_np2, C2, sq2, pi, atom_sigma, rcut_hard
+    real(dp), intent(in) :: rcut_hard_in, atom_sigma_in
     integer, allocatable :: ipiv(:)
     logical :: stable_basis = .true.
 

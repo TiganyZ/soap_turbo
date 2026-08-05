@@ -24,8 +24,21 @@
 ! HND XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 
 module soap_turbo_angular
+
+! Kind parameters, declared locally on purpose: soap_turbo is a submodule with
+! its own upstream and must not depend on the parent tree's kinds module.
+  use, intrinsic :: iso_fortran_env, only: real32, real64, int32, int64
+
   use F_B_C
   use iso_c_binding
+
+! private so a module that uses another does not inherit a second copy
+  integer, parameter, private :: sp  = real32
+  integer, parameter, private :: dp  = real64
+  integer, parameter, private :: i32 = int32
+  integer, parameter, private :: i64 = int64
+  private :: real32, real64, int32, int64
+
 
   contains
 
@@ -39,7 +52,7 @@ module soap_turbo_angular
 
     implicit none
     integer :: l, m, lmax, k
-    real*8 :: plm_array(:), x
+    real(dp) :: plm_array(:), x
     if(lmax < 0 .or. dabs(x) > 1.d0)then
         write(*,*) "Bad arguments for associated Legendre polynomial"
     end if
@@ -109,9 +122,9 @@ module soap_turbo_angular
 
     implicit none
     integer :: l, m, lmax, k, k_lp1_mp1, k_lp1_mm1, k_l_mp1, k_l_mm1, k_temp
-    real*8, intent(in) :: plm_array(:), x
-    real*8, intent(out) :: plm_array_div_sin(:), plm_array_der_mul_sin(:)
-    real*8 :: part1, part2
+    real(dp), intent(in) :: plm_array(:), x
+    real(dp), intent(out) :: plm_array_div_sin(:), plm_array_der_mul_sin(:)
+    real(dp) :: part1, part2
 
     if(lmax < 0 .or. dabs(x) > 1.d0)then
         write(*,*) "Bad arguments for associated Legendre polynomial"
@@ -188,13 +201,13 @@ module soap_turbo_angular
                               scaling, do_derivatives, prefl_rad_der, eimphi_rad_der, eimphi_azi_der, &
                               prefl_new, prefl_der_new )
     implicit none
-    real*8, intent(in) :: rj, atom_sigma, scaling
-    complex*16 :: eimphi(:), eimphi_rad_der(:), eimphi_azi_der(:)
-    real*8 :: phi, rjbysigma, pref, cosm2, sinm2, cosm1, sinm1, cos0, sin0, cosphi2
+    real(dp), intent(in) :: rj, atom_sigma, scaling
+    complex(dp) :: eimphi(:), eimphi_rad_der(:), eimphi_azi_der(:)
+    real(dp) :: phi, rjbysigma, pref, cosm2, sinm2, cosm1, sinm1, cos0, sin0, cosphi2
     integer :: lmax, l, m, k
-    real*8 :: prefl_der_new(0:), prefl_new(0:)
-    real*8 :: prefl(0:), fact_array(:), prefl_rad_der(0:), pref_rad_der
-    complex*16 :: prefm(0:)
+    real(dp) :: prefl_der_new(0:), prefl_new(0:)
+    real(dp) :: prefl(0:), fact_array(:), prefl_rad_der(0:), pref_rad_der
+    complex(dp) :: prefm(0:)
     logical, intent(in) :: do_derivatives
 
     rjbysigma = rj/atom_sigma
@@ -265,9 +278,9 @@ module soap_turbo_angular
   subroutine get_ilexp(ilexp_array, fact_array, lmax, x)
     implicit none
 
-    real*8 :: ilexp_array(0:), x, x2, x4, fl, flm1, flm2, xcut = 1.d-7, fact
+    real(dp) :: ilexp_array(0:), x, x2, x4, fl, flm1, flm2, xcut = 1.d-7, fact
     integer :: l, i, lmax
-    real*8 :: fact_array(:)
+    real(dp) :: fact_array(:)
 
     if( lmax < 0 )then
       write(*,*) "Bad argument (l<0) for function ilexp_double!"
@@ -339,11 +352,11 @@ module soap_turbo_angular
   subroutine get_ilexp_der(ilexp_array, lmax, rj, atom_sigma, scaling, ilexp_array_der)
     implicit none
 
-    real*8, intent(in) :: ilexp_array(0:), rj, atom_sigma, scaling
+    real(dp), intent(in) :: ilexp_array(0:), rj, atom_sigma, scaling
     integer, intent(in) :: lmax
-    real*8, intent(inout) :: ilexp_array_der(0:)
+    real(dp), intent(inout) :: ilexp_array_der(0:)
     integer :: l
-    real*8 :: coeff1, coeff2
+    real(dp) :: coeff1, coeff2
 
     coeff1 = 2.d0*rj/atom_sigma**2
     coeff2 = 1.d0 - scaling*rj/atom_sigma
@@ -391,26 +404,26 @@ module soap_turbo_angular
 
 !     integer(c_int), intent(in) :: n_species, n_atom_pairs
 !     integer (c_int):: lmax, kmax, n_neigh(:), n_sites, i, j, k, kmax_der, i_sp, k_int,l,m,lmpo
-! !    complex*16 :: exp_coeff(:,:), exp_coeff_rad_der(:,:), exp_coeff_azi_der(:,:), exp_coeff_pol_der(:,:)
-! !   real*8 :: thetas(:), phis(:), atom_sigma_in(:), atom_sigma, atom_sigma_scaling(:), rjs(:), x, theta, phi, rj
-!     real*8 :: thetas(:), phis(:),  atom_sigma, rjs(:), x, theta, phi, rj
+! !    complex(dp) :: exp_coeff(:,:), exp_coeff_rad_der(:,:), exp_coeff_azi_der(:,:), exp_coeff_pol_der(:,:)
+! !   real(dp) :: thetas(:), phis(:), atom_sigma_in(:), atom_sigma, atom_sigma_scaling(:), rjs(:), x, theta, phi, rj
+!     real(dp) :: thetas(:), phis(:),  atom_sigma, rjs(:), x, theta, phi, rj
 !     real(c_double), intent(in) :: rcut
-!     real*8 :: amplitude
+!     real(dp) :: amplitude
 ! !   I should probably allocate and save these variables internally to minimize the number of variables that
 ! !   need to be passed to this subroutine
-!     complex*16 :: eimphi(:), eimphi_rad_der(:)
-!     real*8 :: preflm(:), plm_array(:)
-!     real*8 :: prefl(0:), fact_array(:), prefl_rad_der(0:)
-!     complex*16 :: prefm(0:)
+!     complex(dp) :: eimphi(:), eimphi_rad_der(:)
+!     real(dp) :: preflm(:), plm_array(:)
+!     real(dp) :: prefl(0:), fact_array(:), prefl_rad_der(0:)
+!     complex(dp) :: prefm(0:)
 !     logical, intent(in) :: mask(:,:)
 !     logical, intent(in) ::  do_derivatives
-!     real*8, allocatable :: plm_array_der(:), plm_array_div_sin(:), plm_array_der_mul_sin(:)
+!     real(dp), allocatable :: plm_array_der(:), plm_array_div_sin(:), plm_array_der_mul_sin(:)
 !     real(c_double), allocatable,target :: prefl_array_global(:,:), prefl_array_global_der(:,:)
 !     real(c_double), allocatable,target :: plm_array_global(:,:), plm_array_der_global(:,:)
-!     complex*16, allocatable :: eimphi_azi_der(:)
-!     complex*16, allocatable, target  :: eimphi_global(:,:), eimphi_rad_der_global(:,:)
-!     complex*16, allocatable, target  :: tr_exp_coeff(:,:), eimphi_azi_der_global(:,:)
-!     !complex*16, allocatable, target :: tr_exp_coeff_rad_der(:,:), &
+!     complex(dp), allocatable :: eimphi_azi_der(:)
+!     complex(dp), allocatable, target  :: eimphi_global(:,:), eimphi_rad_der_global(:,:)
+!     complex(dp), allocatable, target  :: tr_exp_coeff(:,:), eimphi_azi_der_global(:,:)
+!     !complex(dp), allocatable, target :: tr_exp_coeff_rad_der(:,:), &
 !     !                tr_exp_coeff_azi_der(:,:), tr_exp_coeff_pol_der (:,:)
 !     type(c_ptr) :: preflm_d, prefl_array_global_d
 !     type(c_ptr) :: thetas_d, plm_array_global_d, plm_array_der_global_d,eimphi_global_d
@@ -456,13 +469,13 @@ module soap_turbo_angular
 
     logical, intent(in) :: do_derivatives
 
-    real*8, intent(in) :: rcut
+    real(dp), intent(in) :: rcut
     
     ! Internal variables
     integer :: kmax
     integer :: kmax_der
     integer :: lmpo
-    complex*16 :: c
+    complex(dp) :: c
     logical(c_bool) :: c_do_derivatives
 
     ! Input GPU pointers
