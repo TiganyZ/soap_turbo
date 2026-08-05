@@ -27,7 +27,8 @@ module soap_turbo_desc
 
 ! Kind parameters, declared locally on purpose: soap_turbo is a submodule with
 ! its own upstream and must not depend on the parent tree's kinds module.
-  use, intrinsic :: iso_fortran_env, only: real32, real64, int32, int64
+ use, intrinsic :: iso_fortran_env, only: real32, real64, int32, int64
+
 
 
   use soap_turbo_radial
@@ -37,11 +38,14 @@ module soap_turbo_desc
   use mpi
 
 ! private so a module that uses another does not inherit a second copy
-  integer, parameter, private :: sp  = real32
-  integer, parameter, private :: dp  = real64
-  integer, parameter, private :: i32 = int32
-  integer, parameter, private :: i64 = int64
-  private :: real32, real64, int32, int64
+ integer, parameter, private :: sp  = real32
+ integer, parameter, private :: dp  = real64
+ integer, parameter, private :: i32 = int32
+ integer, parameter, private :: i64 = int64
+ private :: real32
+ private :: real64
+ private :: int32
+ private :: int64
 
 
   contains
@@ -66,114 +70,254 @@ module soap_turbo_desc
 ! Input variables
 !  real(dp), intent(inout) :: time_misca,time_get_rad, time_get_ang, time_get_cart
 !  real(dp) :: tt_misca(2)=0.0,tt_rad(2)=0.0,tt_ang(2)=0.0,tt_cart(2)=0.0
-  real(c_double), intent(in), target :: rjs(:), thetas(:), phis(:)
-  real(c_double), intent(in), target :: central_weight(:), atom_sigma_r(:)
-  real(c_double), intent(in), target :: rcut_hard(:)
+ real(c_double), intent(in), target :: rjs(:)
+ real(c_double), intent(in), target :: thetas(:)
+ real(c_double), intent(in), target :: phis(:)
+ real(c_double), intent(in), target :: central_weight(:)
+ real(c_double), intent(in), target :: atom_sigma_r(:)
+ real(c_double), intent(in), target :: rcut_hard(:)
 
-  integer(c_int), intent(in) :: n_species, radial_enhancement
-  integer(c_int), intent(in), target ::  species(:,:), species_multiplicity(:)
-  integer, intent(in) :: n_sites,l_max, n_atom_pairs, alpha_max(:), compress_soap_indices(:)
-  integer(c_int), intent(in), target ::  n_neigh(:)
-  logical, intent(in) :: do_derivatives, do_timing, compress_soap
-  logical, intent(in) :: mask(:,:)
-  logical(c_bool), allocatable, target :: new_mask(:,:)
-  integer :: i_sp
+ integer(c_int), intent(in) :: n_species
+ integer(c_int), intent(in) :: radial_enhancement
+ integer(c_int), intent(in), target :: species(:,:)
+ integer(c_int), intent(in), target :: species_multiplicity(:)
+ integer, intent(in) :: n_sites
+ integer, intent(in) :: l_max
+ integer, intent(in) :: n_atom_pairs
+ integer, intent(in) :: alpha_max(:)
+ integer, intent(in) :: compress_soap_indices(:)
+ integer(c_int), intent(in), target :: n_neigh(:)
+ logical, intent(in) :: do_derivatives
+ logical, intent(in) :: do_timing
+ logical, intent(in) :: compress_soap
+ logical, intent(in) :: mask(:,:)
+ logical(c_bool), allocatable, target :: new_mask(:,:)
+ integer :: i_sp
 
-  character(*), intent(in) :: basis, scaling_mode
+ character(*), intent(in) :: basis
+ character(*), intent(in) :: scaling_mode
 
 ! Output variables
-  real(c_double), intent(inout), target :: soap(:,:), soap_cart_der(:,:,:)
-  type(c_ptr), intent(inout) :: cublas_handle, gpu_stream
+ real(c_double), intent(inout), target :: soap(:,:)
+ real(c_double), intent(inout), target :: soap_cart_der(:,:,:)
+ type(c_ptr), intent(inout) :: cublas_handle
+ type(c_ptr), intent(inout) :: gpu_stream
 !-------------------
 
 
 !-------------------
 ! Internal variables
-  complex(c_double_complex), allocatable, target :: angular_exp_coeff(:,:), cnk(:,:,:)
-  complex(c_double_complex), allocatable, target :: angular_exp_coeff_rad_der(:,:), angular_exp_coeff_azi_der(:,:)
-  complex(c_double_complex), allocatable, target :: cnk_azi_der(:,:,:), cnk_rad_der(:,:,:), cnk_pol_der(:,:,:)
+ complex(c_double_complex), allocatable, target :: angular_exp_coeff(:,:)
+ complex(c_double_complex), allocatable, target :: cnk(:,:,:)
+ complex(c_double_complex), allocatable, target :: angular_exp_coeff_rad_der(:,:)
+ complex(c_double_complex), allocatable, target :: angular_exp_coeff_azi_der(:,:)
+ complex(c_double_complex), allocatable, target :: cnk_azi_der(:,:,:)
+ complex(c_double_complex), allocatable, target :: cnk_rad_der(:,:,:)
+ complex(c_double_complex), allocatable, target :: cnk_pol_der(:,:,:)
 ! Debug dump of cnk_rad_der (see TURBOGAP_DUMP_CNK below)
-  complex(c_double_complex), allocatable, target :: cnk_rad_der_dump(:,:,:)
-  real(c_double), allocatable, target :: rad_exp_der_dump(:,:)
-  complex(c_double_complex), allocatable, target :: ang_rad_der_dump(:,:)
+ complex(c_double_complex), allocatable, target :: cnk_rad_der_dump(:,:,:)
+ real(c_double), allocatable, target :: rad_exp_der_dump(:,:)
+ complex(c_double_complex), allocatable, target :: ang_rad_der_dump(:,:)
   character(len=32) :: dump_env
-  integer :: dump_len
-  complex(c_double_complex), allocatable, target :: angular_exp_coeff_pol_der(:,:)
-  complex(c_double_complex), allocatable, target :: eimphi(:), prefm(:), eimphi_rad_der(:)
+ integer :: dump_len
+ complex(c_double_complex), allocatable, target :: angular_exp_coeff_pol_der(:,:)
+ complex(c_double_complex), allocatable, target :: eimphi(:)
+ complex(c_double_complex), allocatable, target :: prefm(:)
+ complex(c_double_complex), allocatable, target :: eimphi_rad_der(:)
 
-  real(c_double), allocatable,target :: W(:,:), S(:,:), multiplicity_array(:) 
+ real(c_double), allocatable,target :: W(:,:)
+ real(c_double), allocatable,target :: S(:,:)
+ real(c_double), allocatable,target :: multiplicity_array(:)
 !  real(c_double), allocatable,target ::W_check(:,:), S_check(:,:)
-  real(c_double), allocatable,target :: soap_rad_der(:,:), sqrt_dot_p(:), soap_azi_der(:,:)
-  real(dp), allocatable :: W_temp(:,:), S_temp(:,:)
-  real(c_double), allocatable,target :: radial_exp_coeff(:,:), soap_pol_der(:,:)
-  real(dp), allocatable, target :: preflm(:), plm_array(:), prefl(:), fact_array(:), prefl_rad_der(:)
-  real(c_double), allocatable,target :: radial_exp_coeff_der(:,:)
-  real(dp) :: amplitude, multiplicity, pi, rcut_max
-  real(dp) :: radial_time, angular_time, coeff_time, time3, total_time, soap_time, time1, time2, compress_time, &
-            memory_time, basis_time
+ real(c_double), allocatable,target :: soap_rad_der(:,:)
+ real(c_double), allocatable,target :: sqrt_dot_p(:)
+ real(c_double), allocatable,target :: soap_azi_der(:,:)
+ real(dp), allocatable :: W_temp(:,:)
+ real(dp), allocatable :: S_temp(:,:)
+ real(c_double), allocatable,target :: radial_exp_coeff(:,:)
+ real(c_double), allocatable,target :: soap_pol_der(:,:)
+ real(dp), allocatable, target :: preflm(:)
+ real(dp), allocatable, target :: plm_array(:)
+ real(dp), allocatable, target :: prefl(:)
+ real(dp), allocatable, target :: fact_array(:)
+ real(dp), allocatable, target :: prefl_rad_der(:)
+ real(c_double), allocatable,target :: radial_exp_coeff_der(:,:)
+ real(dp) :: amplitude
+ real(dp) :: multiplicity
+ real(dp) :: pi
+ real(dp) :: rcut_max
+ real(dp) :: radial_time
+ real(dp) :: angular_time
+ real(dp) :: coeff_time
+ real(dp) :: time3
+ real(dp) :: total_time
+ real(dp) :: soap_time
+ real(dp) :: time1
+ real(dp) :: time2
+ real(dp) :: compress_time
+ real(dp) :: memory_time
+ real(dp) :: basis_time
 
-  integer(c_int), allocatable, target :: i_beg(:), i_end(:)
-  integer(c_int), allocatable, target :: k3_index(:),i_k2_start(:), k2_start(:), k2_i_site(:)
-  integer :: n_max_prev !! NOTE CHANGING FROM SAVE BEHAVIOUR, ALWAYS RECOMPUTE BASIS ON GPU 
-  integer :: k_max, n_max
-  integer :: i, counter, j, k, n_soap, k2, k3, n, l, m, np, counter2
-  logical(c_bool), allocatable, target :: skip_soap_component(:,:,:)
-  logical, allocatable, target :: do_central(:)
-  logical, intent(inout):: recompute_basis !! NOTE CHANGING FROM SAVE BEHAVIOUR, ALWAYS RECOMPUTE BASIS ON GPU 
-  integer(c_int) :: rank, ierr, n_multiplicity
-  type(c_ptr) :: i_beg_d, i_end_d, preflm_d, plm_array_d, eimphi_d, prefm_d
-  type(c_ptr) :: prefl_d, eimphi_rad_der_d, prefl_rad_der_d
-  type(c_ptr) :: cnk_d, sqrt_dot_p_d
-  type(c_ptr), intent(inout) :: multiplicity_array_d, W_d, S_d !! NOTE CHANGING FROM SAVE BEHAVIOUR, ALWAYS RECOMPUTE BASIS ON GPU 
-  type(c_ptr) :: skip_soap_component_d
-  real(dp) :: ttt(2)=0.d0
-  real(dp), intent(inout) :: time_get_soap
-  integer :: maxneigh
-  type(c_ptr) ::  thetas_d,phis_d,rjs_d
-  type(c_ptr) ::  k2_i_site_d
-  type(c_ptr) :: k3_index_d, i_k2_start_d, n_neigh_d
-  type(c_ptr) :: soap_rad_der_d, soap_azi_der_d, soap_pol_der_d
-  type(c_ptr) :: cnk_rad_der_d, cnk_azi_der_d,  cnk_pol_der_d
-  type(c_ptr) :: radial_exp_coeff_d, angular_exp_coeff_d, radial_exp_coeff_der_d
-  type(c_ptr) :: radial_exp_coeff_temp1_d, radial_exp_coeff_temp2_d, radial_exp_coeff_der_temp_d
-  type(c_ptr) :: angular_exp_coeff_rad_der_d, angular_exp_coeff_azi_der_d
-  type(c_ptr) :: angular_exp_coeff_pol_der_d
-  type(c_ptr), intent(inout) :: soap_cart_der_d, soap_d, nf_d, rcut_hard_d, rcut_soft_d, global_scaling_d
-  type(c_ptr), intent(inout) :: atom_sigma_r_d, atom_sigma_r_scaling_d,atom_sigma_t_d,atom_sigma_t_scaling_d
-  type(c_ptr), intent(inout) :: amplitude_scaling_d, alpha_max_d, central_weight_d
-  type(c_ptr) :: k2_start_d
-  integer(c_size_t) :: st_soap, st_soap_cart_der, st_soap_rap_der
-  integer(c_size_t) :: st_n_atom_pairs_int, st_n_sites_int, st_skip_component
-  integer(c_size_t) :: st_n_atom_pairs_double, st_n_sites_double, st_n_multiplicity_double
-  integer(c_size_t) :: st_cnk,st_cnk_rap_der, st_rad_exp_coeff_der_double, st_ang_exp_coeff_rad_der
-  integer(c_size_t) :: st_mask_d, st_size_rcut_hard, st_size_atom_sigma_r,st_size_W, st_size_S
-  integer(c_size_t) :: st_size_i_beg,st_size_global_scaling, st_size_i_end, st_size_angular_exp_coeff
-  integer(c_size_t) :: st_size_atom_sigma_t, st_size_atom_sigma_t_scaling, st_size_species
-  integer(c_size_t) :: st_size_species_multiplicity,st_size_central_weight, st_size_preflm,st_do_central_d
-  integer(c_size_t) :: size_tmp_var
-  integer(c_size_t), intent(inout) :: st_W_d, st_S_d, st_multiplicity_array_d
+ integer(c_int), allocatable, target :: i_beg(:)
+ integer(c_int), allocatable, target :: i_end(:)
+ integer(c_int), allocatable, target :: k3_index(:)
+ integer(c_int), allocatable, target :: i_k2_start(:)
+ integer(c_int), allocatable, target :: k2_start(:)
+ integer(c_int), allocatable, target :: k2_i_site(:)
+ integer :: n_max_prev !! NOTE CHANGING FROM SAVE BEHAVIOUR
+ integer :: k_max
+ integer :: n_max
+ integer :: i
+ integer :: counter
+ integer :: j
+ integer :: k
+ integer :: n_soap
+ integer :: k2
+ integer :: k3
+ integer :: n
+ integer :: l
+ integer :: m
+ integer :: np
+ integer :: counter2
+ logical(c_bool), allocatable, target :: skip_soap_component(:,:,:)
+ logical, allocatable, target :: do_central(:)
+ logical, intent(inout):: recompute_basis !! NOTE CHANGING FROM SAVE BEHAVIOUR
+ integer(c_int) :: rank
+ integer(c_int) :: ierr
+ integer(c_int) :: n_multiplicity
+ type(c_ptr) :: i_beg_d
+ type(c_ptr) :: i_end_d
+ type(c_ptr) :: preflm_d
+ type(c_ptr) :: plm_array_d
+ type(c_ptr) :: eimphi_d
+ type(c_ptr) :: prefm_d
+ type(c_ptr) :: prefl_d
+ type(c_ptr) :: eimphi_rad_der_d
+ type(c_ptr) :: prefl_rad_der_d
+ type(c_ptr) :: cnk_d
+ type(c_ptr) :: sqrt_dot_p_d
+ type(c_ptr), intent(inout) :: multiplicity_array_d
+ type(c_ptr), intent(inout) :: W_d
+ type(c_ptr), intent(inout) :: S_d !! NOTE CHANGING FROM SAVE BEHAVIOUR
+ type(c_ptr) :: skip_soap_component_d
+ real(dp) :: ttt(2)=0.d0
+ real(dp), intent(inout) :: time_get_soap
+ integer :: maxneigh
+ type(c_ptr) :: thetas_d
+ type(c_ptr) :: phis_d
+ type(c_ptr) :: rjs_d
+ type(c_ptr) :: k2_i_site_d
+ type(c_ptr) :: k3_index_d
+ type(c_ptr) :: i_k2_start_d
+ type(c_ptr) :: n_neigh_d
+ type(c_ptr) :: soap_rad_der_d
+ type(c_ptr) :: soap_azi_der_d
+ type(c_ptr) :: soap_pol_der_d
+ type(c_ptr) :: cnk_rad_der_d
+ type(c_ptr) :: cnk_azi_der_d
+ type(c_ptr) :: cnk_pol_der_d
+ type(c_ptr) :: radial_exp_coeff_d
+ type(c_ptr) :: angular_exp_coeff_d
+ type(c_ptr) :: radial_exp_coeff_der_d
+ type(c_ptr) :: radial_exp_coeff_temp1_d
+ type(c_ptr) :: radial_exp_coeff_temp2_d
+ type(c_ptr) :: radial_exp_coeff_der_temp_d
+ type(c_ptr) :: angular_exp_coeff_rad_der_d
+ type(c_ptr) :: angular_exp_coeff_azi_der_d
+ type(c_ptr) :: angular_exp_coeff_pol_der_d
+ type(c_ptr), intent(inout) :: soap_cart_der_d
+ type(c_ptr), intent(inout) :: soap_d
+ type(c_ptr), intent(inout) :: nf_d
+ type(c_ptr), intent(inout) :: rcut_hard_d
+ type(c_ptr), intent(inout) :: rcut_soft_d
+ type(c_ptr), intent(inout) :: global_scaling_d
+ type(c_ptr), intent(inout) :: atom_sigma_r_d
+ type(c_ptr), intent(inout) :: atom_sigma_r_scaling_d
+ type(c_ptr), intent(inout) :: atom_sigma_t_d
+ type(c_ptr), intent(inout) :: atom_sigma_t_scaling_d
+ type(c_ptr), intent(inout) :: amplitude_scaling_d
+ type(c_ptr), intent(inout) :: alpha_max_d
+ type(c_ptr), intent(inout) :: central_weight_d
+ type(c_ptr) :: k2_start_d
+ integer(c_size_t) :: st_soap
+ integer(c_size_t) :: st_soap_cart_der
+ integer(c_size_t) :: st_soap_rap_der
+ integer(c_size_t) :: st_n_atom_pairs_int
+ integer(c_size_t) :: st_n_sites_int
+ integer(c_size_t) :: st_skip_component
+ integer(c_size_t) :: st_n_atom_pairs_double
+ integer(c_size_t) :: st_n_sites_double
+ integer(c_size_t) :: st_n_multiplicity_double
+ integer(c_size_t) :: st_cnk
+ integer(c_size_t) :: st_cnk_rap_der
+ integer(c_size_t) :: st_rad_exp_coeff_der_double
+ integer(c_size_t) :: st_ang_exp_coeff_rad_der
+ integer(c_size_t) :: st_mask_d
+ integer(c_size_t) :: st_size_rcut_hard
+ integer(c_size_t) :: st_size_atom_sigma_r
+ integer(c_size_t) :: st_size_W
+ integer(c_size_t) :: st_size_S
+ integer(c_size_t) :: st_size_i_beg
+ integer(c_size_t) :: st_size_global_scaling
+ integer(c_size_t) :: st_size_i_end
+ integer(c_size_t) :: st_size_angular_exp_coeff
+ integer(c_size_t) :: st_size_atom_sigma_t
+ integer(c_size_t) :: st_size_atom_sigma_t_scaling
+ integer(c_size_t) :: st_size_species
+ integer(c_size_t) :: st_size_species_multiplicity
+ integer(c_size_t) :: st_size_central_weight
+ integer(c_size_t) :: st_size_preflm
+ integer(c_size_t) :: st_do_central_d
+ integer(c_size_t) :: size_tmp_var
+ integer(c_size_t), intent(inout) :: st_W_d
+ integer(c_size_t), intent(inout) :: st_S_d
+ integer(c_size_t), intent(inout) :: st_multiplicity_array_d
   
-  integer(c_int) :: bintybint, size_central_weight
+ integer(c_int) :: bintybint
+ integer(c_int) :: size_central_weight
 
-  logical :: W_S_initialized = .false.!! NOTE CHANGING FROM SAVE BEHAVIOUR, ALWAYS RECOMPUTE BASIS ON GPU 
-  type(c_ptr) :: W_d_work, S_d_work, species_multiplicity_d, species_d
+ logical :: W_S_initialized = .false.!! NOTE CHANGING FROM SAVE BEHAVIOUR
+ type(c_ptr) :: W_d_work
+ type(c_ptr) :: S_d_work
+ type(c_ptr) :: species_multiplicity_d
+ type(c_ptr) :: species_d
 ! type(c_ptr) :: central_weight_d, atom_sigma_r_d, atom_sigma_t_d, atom_sigma_t_scaling_d, mask_d, do_central_d
-  type(c_ptr) :: mask_d, do_central_d
-  integer(c_int) :: size_1_species, size_2_species, size_species_multiplicity, size_i_beg, size_i_end
-  integer(c_int) :: size_rcut_hard, size_atom_sigma_t, size_atom_sigma_r, size_2_W, size_2_S,size_1_W, size_1_S
-  integer(c_int) :: size_atom_sigma_t_scaling, size_global_scaling, size_alphamax
-  integer(c_int) :: tmp_cint_val
+ type(c_ptr) :: mask_d
+ type(c_ptr) :: do_central_d
+ integer(c_int) :: size_1_species
+ integer(c_int) :: size_2_species
+ integer(c_int) :: size_species_multiplicity
+ integer(c_int) :: size_i_beg
+ integer(c_int) :: size_i_end
+ integer(c_int) :: size_rcut_hard
+ integer(c_int) :: size_atom_sigma_t
+ integer(c_int) :: size_atom_sigma_r
+ integer(c_int) :: size_2_W
+ integer(c_int) :: size_2_S
+ integer(c_int) :: size_1_W
+ integer(c_int) :: size_1_S
+ integer(c_int) :: size_atom_sigma_t_scaling
+ integer(c_int) :: size_global_scaling
+ integer(c_int) :: size_alphamax
+ integer(c_int) :: tmp_cint_val
 ! type(c_ptr) :: global_scaling_d, amplitude_scaling_d, alpha_max_d, nf_d
 ! type(c_ptr) :: amplitude_scaling_d, alpha_max_d
 ! type(c_ptr) :: alpha_max_d
-  logical(c_bool) :: c_do_derivatives
-  integer :: kij, ntemp, ntemp_der, mode
-  integer(c_size_t) :: ntemp_d, ntemp_der_d
-  integer, allocatable, target  :: k_idx(:)
+ logical(c_bool) :: c_do_derivatives
+ integer :: kij
+ integer :: ntemp
+ integer :: ntemp_der
+ integer :: mode
+ integer(c_size_t) :: ntemp_d
+ integer(c_size_t) :: ntemp_der_d
+ integer, allocatable, target :: k_idx(:)
   !real(c_double),allocatable, target :: amplitude_save(:),  amplitude_der_save(:)
   !type(c_ptr) :: amplitude_save_d,  amplitude_der_save_d 
-  type(c_ptr) ::  all_exp_coeff_temp2_d, all_exp_coeff_temp1_d
-  integer(c_size_t) :: st_size_amplitudes, st_size_exp_coeff_temp,st_size_alphamax
+ type(c_ptr) :: all_exp_coeff_temp2_d
+ type(c_ptr) :: all_exp_coeff_temp1_d
+ integer(c_size_t) :: st_size_amplitudes
+ integer(c_size_t) :: st_size_exp_coeff_temp
+ integer(c_size_t) :: st_size_alphamax
 !-------------------
 
   
@@ -1088,13 +1232,29 @@ time2 = MPI_wtime()
 
     implicit none
 
-    real(dp), intent(in) :: radial_exp_coeff(:,:), radial_exp_coeff_der(:,:), rjs(:), cutoff
-    complex(dp), intent(in) :: angular_exp_coeff(:,:)
-    complex(dp) :: angular_exp_coeff_rad_der(:,:), angular_exp_coeff_azi_der(:,:), angular_exp_coeff_pol_der(:,:)
-    complex(dp), intent(out) :: cnk_rad_der(:,:,:), cnk_azi_der(:,:,:), cnk_pol_der(:,:,:)
-    integer, intent(in) :: n_sites, n_max, l_max, n_neigh(:)
-    integer :: k2, i, j, n, m, k, l
-    real(dp) :: pi
+ real(dp), intent(in) :: radial_exp_coeff(:,:)
+ real(dp), intent(in) :: radial_exp_coeff_der(:,:)
+ real(dp), intent(in) :: rjs(:)
+ real(dp), intent(in) :: cutoff
+ complex(dp), intent(in) :: angular_exp_coeff(:,:)
+ complex(dp) :: angular_exp_coeff_rad_der(:,:)
+ complex(dp) :: angular_exp_coeff_azi_der(:,:)
+ complex(dp) :: angular_exp_coeff_pol_der(:,:)
+ complex(dp), intent(out) :: cnk_rad_der(:,:,:)
+ complex(dp), intent(out) :: cnk_azi_der(:,:,:)
+ complex(dp), intent(out) :: cnk_pol_der(:,:,:)
+ integer, intent(in) :: n_sites
+ integer, intent(in) :: n_max
+ integer, intent(in) :: l_max
+ integer, intent(in) :: n_neigh(:)
+ integer :: k2
+ integer :: i
+ integer :: j
+ integer :: n
+ integer :: m
+ integer :: k
+ integer :: l
+ real(dp) :: pi
 
     pi = dacos(-1.d0)
 
@@ -1143,20 +1303,37 @@ time2 = MPI_wtime()
     implicit none
 
 !   Input variables
-    integer, intent(in) :: max_species_multiplicity, n_species_soap, which_atom, indices(1:3), &
-                           n_neigh(:), n_atom_pairs, neighbors_list(:)
-    character*8, intent(in) :: species_types_soap(:), xyz_species(:), xyz_species_supercell(:)
-    logical, intent(in) :: all_atoms
+ integer, intent(in) :: max_species_multiplicity
+ integer, intent(in) :: n_species_soap
+ integer, intent(in) :: which_atom
+ integer, intent(in) :: indices(1:3)
+ integer, intent(in) :: n_neigh(:)
+ integer, intent(in) :: n_atom_pairs
+ integer, intent(in) :: neighbors_list(:)
+ character*8, intent(in) :: species_types_soap(:)
+ character*8, intent(in) :: xyz_species(:)
+ character*8, intent(in) :: xyz_species_supercell(:)
+ logical, intent(in) :: all_atoms
 
 !   Output variables
-    integer, allocatable, intent(out) :: species(:,:), species_multiplicity(:), &
-                                         species_multiplicity_supercell(:)
+ integer, allocatable, intent(out) :: species(:,:)
+ integer, allocatable, intent(out) :: species_multiplicity(:)
+ integer, allocatable, intent(out) :: species_multiplicity_supercell(:)
 !    integer, allocatable :: species_multiplicity_supercell(:)
-    logical, allocatable, intent(out) :: mask_species(:,:)
+ logical, allocatable, intent(out) :: mask_species(:,:)
 
 !   Internal variables
-    integer, allocatable :: species_supercell(:,:)
-    integer :: n_sites, n_sites_supercell, i, j, k, i2, j2, k2, ijunk, counter
+ integer, allocatable :: species_supercell(:,:)
+ integer :: n_sites
+ integer :: n_sites_supercell
+ integer :: i
+ integer :: j
+ integer :: k
+ integer :: i2
+ integer :: j2
+ integer :: k2
+ integer :: ijunk
+ integer :: counter
 
 
     n_sites = size(xyz_species)

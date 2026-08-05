@@ -27,16 +27,20 @@ module soap_turbo_functions
 
 ! Kind parameters, declared locally on purpose: soap_turbo is a submodule with
 ! its own upstream and must not depend on the parent tree's kinds module.
-  use, intrinsic :: iso_fortran_env, only: real32, real64, int32, int64
 
+  use, intrinsic :: iso_fortran_env, only: real32, real64, int32, int64
+  implicit none 
 
 
 ! private so a module that uses another does not inherit a second copy
-  integer, parameter, private :: sp  = real32
-  integer, parameter, private :: dp  = real64
-  integer, parameter, private :: i32 = int32
-  integer, parameter, private :: i64 = int64
-  private :: real32, real64, int32, int64
+ integer, parameter, private :: sp  = real32
+ integer, parameter, private :: dp  = real64
+ integer, parameter, private :: i32 = int32
+ integer, parameter, private :: i64 = int64
+ private :: real32
+ private :: real64
+ private :: int32
+ private :: int64
 
   contains
 
@@ -45,8 +49,17 @@ module soap_turbo_functions
 !   Associated Legendre polynomial Plm(x).
 !   l is > 0, m can take values from 0 to l and x is within the [-1, 1] domain
     implicit none
-    integer :: l, m, i, l2
-    real(dp) :: plm_double, x, dfact_arg, pl2m, pmm, pmp1m, sq
+ integer :: l
+ integer :: m
+ integer :: i
+ integer :: l2
+ real(dp) :: plm_double
+ real(dp) :: x
+ real(dp) :: dfact_arg
+ real(dp) :: pl2m
+ real(dp) :: pmm
+ real(dp) :: pmp1m
+ real(dp) :: sq
     if(l < 0 .or. m < 0 .or. m > l .or. dabs(x) > 1.d0)then
         write(*,*) "Bad arguments for associated Legendre polynomial"
     end if
@@ -88,8 +101,17 @@ module soap_turbo_functions
 !   Associated Legendre polynomial Plm(x).
 !   l is > 0, m can take values from 0 to l and x is within the [-1, 1] domain
     implicit none
-    integer :: l, m, i, l2
-    real(sp) :: plm_single, x, dfact_arg, pl2m, pmm, pmp1m, sq
+ integer :: l
+ integer :: m
+ integer :: i
+ integer :: l2
+ real(sp) :: plm_single
+ real(sp) :: x
+ real(sp) :: dfact_arg
+ real(sp) :: pl2m
+ real(sp) :: pmm
+ real(sp) :: pmp1m
+ real(sp) :: sq
     if(l < 0 .or. m < 0 .or. m > l .or. abs(x) > 1.)then
         write(*,*) "Bad arguments for associated Legendre polynomial"
     end if
@@ -130,9 +152,20 @@ module soap_turbo_functions
 !**************************************************************************
   function ylm_double(l, m, theta, phi)
     implicit none
-    real(dp) :: plm, theta, phi, pref, pi, ylm_r, ylm_i, fact1, fact2
-    complex(dp) :: ylm_double
-    integer :: l, m, i, sgn
+ real(dp) :: plm
+ real(dp) :: theta
+ real(dp) :: phi
+ real(dp) :: pref
+ real(dp) :: pi
+ real(dp) :: ylm_r
+ real(dp) :: ylm_i
+ real(dp) :: fact1
+ real(dp) :: fact2
+ complex(dp) :: ylm_double
+ integer :: l
+ integer :: m
+ integer :: i
+ integer :: sgn
     pi = dacos(-1.d0)
 !   Factorials for |m|
     fact1 = 1.d0
@@ -175,14 +208,20 @@ module soap_turbo_functions
 !**************************************************************************
   subroutine get_eimphi(eimphi, prefl, prefm, lmax, phi, rj2s2)
     implicit none
-    complex(dp) :: eimphi(:)
-    real(dp) :: phi, mf, rj2s2, pref
-    integer :: lmax, l, m, k
+ complex(dp) :: eimphi(:)
+ real(dp) :: phi
+ real(dp) :: mf
+ real(dp) :: rj2s2
+ real(dp) :: pref
+ integer :: lmax
+ integer :: l
+ integer :: m
+ integer :: k
 !    logical, save :: init = .true.
 !    real(dp), allocatable, save :: prefl(:)
 !    complex(dp), allocatable, save :: prefm(:)
-    real(dp) :: prefl(0:)
-    complex(dp) :: prefm(0:)
+ real(dp) :: prefl(0:)
+ complex(dp) :: prefm(0:)
 
 !    if( init )then
 !      allocate( prefl(0:lmax) )
@@ -214,9 +253,16 @@ module soap_turbo_functions
 !**************************************************************************
   subroutine get_preflm(preflm, lmax)
     implicit none
-    real(dp) :: preflm(:)
-    real(dp) :: ppi, fact1, fact2
-    integer :: lmax, l, m, k, kmax, i
+ real(dp) :: preflm(:)
+ real(dp) :: ppi
+ real(dp) :: fact1
+ real(dp) :: fact2
+ integer :: lmax
+ integer :: l
+ integer :: m
+ integer :: k
+ integer :: kmax
+ integer :: i
     kmax = 1 + lmax*(lmax+1)/2 + lmax
     k = 1
     do l = 0, lmax
@@ -279,8 +325,17 @@ module soap_turbo_functions
   function ilexp_double(l, x)
     implicit none
 
-    real(dp) :: ilexp_double, x, x2, x4, fl, flm1, flm2, xcut = 1.d-7, fact
-    integer :: l, i
+ real(dp) :: ilexp_double
+ real(dp) :: x
+ real(dp) :: x2
+ real(dp) :: x4
+ real(dp) :: fl
+ real(dp) :: flm1
+ real(dp) :: flm2
+ real(dp) :: xcut = 1.d-7
+ real(dp) :: fact
+ integer :: l
+ integer :: i
 
     if( l < 0 )then
       write(*,*) "Bad argument (l<0) for function ilexp_double!"
@@ -340,8 +395,9 @@ module soap_turbo_functions
 
     implicit none
 
-    real(dp), intent(in) :: u(1:3), v(1:3)
-    real(dp) :: cross_product(1:3)
+ real(dp), intent(in) :: u(1:3)
+ real(dp), intent(in) :: v(1:3)
+ real(dp) :: cross_product(1:3)
 
     cross_product(1) = u(2)*v(3) - u(3)*v(2)
     cross_product(2) = u(3)*v(1) - u(1)*v(3)

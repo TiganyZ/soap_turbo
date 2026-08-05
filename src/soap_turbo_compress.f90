@@ -33,16 +33,26 @@ module soap_turbo_compress
   implicit none
 
 ! Input variables
-  integer, intent(in) :: alpha_max(:), l_max
-  character(*), intent(in) :: compress_mode, what_to_do
+ integer, intent(in) :: alpha_max(:)
+ integer, intent(in) :: l_max
+ character(*), intent(in) :: compress_mode
+ character(*), intent(in) :: what_to_do
 
 ! Input-Output variables
-  integer, intent(inout) :: dim, indices(:)
+ integer, intent(inout) :: dim
+ integer, intent(inout) :: indices(:)
 
 ! Internal vairables
-  integer, allocatable :: pivot(:)
-  integer :: n_species, n_max, i, counter, n, m, l, k
-  logical :: set_indices
+ integer, allocatable :: pivot(:)
+ integer :: n_species
+ integer :: n_max
+ integer :: i
+ integer :: counter
+ integer :: n
+ integer :: m
+ integer :: l
+ integer :: k
+ logical :: set_indices
 
   if( what_to_do == "get_dim" )then
     set_indices = .false.

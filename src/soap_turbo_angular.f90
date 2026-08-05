@@ -27,17 +27,21 @@ module soap_turbo_angular
 
 ! Kind parameters, declared locally on purpose: soap_turbo is a submodule with
 ! its own upstream and must not depend on the parent tree's kinds module.
+
   use, intrinsic :: iso_fortran_env, only: real32, real64, int32, int64
 
   use F_B_C
   use iso_c_binding
 
 ! private so a module that uses another does not inherit a second copy
-  integer, parameter, private :: sp  = real32
-  integer, parameter, private :: dp  = real64
-  integer, parameter, private :: i32 = int32
-  integer, parameter, private :: i64 = int64
-  private :: real32, real64, int32, int64
+ integer, parameter, private :: sp  = real32
+ integer, parameter, private :: dp  = real64
+ integer, parameter, private :: i32 = int32
+ integer, parameter, private :: i64 = int64
+ private :: real32
+ private :: real64
+ private :: int32
+ private :: int64
 
 
   contains
@@ -51,8 +55,12 @@ module soap_turbo_angular
   subroutine get_plm_array(plm_array, lmax, x)
 
     implicit none
-    integer :: l, m, lmax, k
-    real(dp) :: plm_array(:), x
+ integer :: l
+ integer :: m
+ integer :: lmax
+ integer :: k
+ real(dp) :: plm_array(:)
+ real(dp) :: x
     if(lmax < 0 .or. dabs(x) > 1.d0)then
         write(*,*) "Bad arguments for associated Legendre polynomial"
     end if
@@ -121,10 +129,21 @@ module soap_turbo_angular
   subroutine get_plm_array_der(plm_array, lmax, x, plm_array_div_sin, plm_array_der_mul_sin)
 
     implicit none
-    integer :: l, m, lmax, k, k_lp1_mp1, k_lp1_mm1, k_l_mp1, k_l_mm1, k_temp
-    real(dp), intent(in) :: plm_array(:), x
-    real(dp), intent(out) :: plm_array_div_sin(:), plm_array_der_mul_sin(:)
-    real(dp) :: part1, part2
+ integer :: l
+ integer :: m
+ integer :: lmax
+ integer :: k
+ integer :: k_lp1_mp1
+ integer :: k_lp1_mm1
+ integer :: k_l_mp1
+ integer :: k_l_mm1
+ integer :: k_temp
+ real(dp), intent(in) :: plm_array(:)
+ real(dp), intent(in) :: x
+ real(dp), intent(out) :: plm_array_div_sin(:)
+ real(dp), intent(out) :: plm_array_der_mul_sin(:)
+ real(dp) :: part1
+ real(dp) :: part2
 
     if(lmax < 0 .or. dabs(x) > 1.d0)then
         write(*,*) "Bad arguments for associated Legendre polynomial"
@@ -201,14 +220,34 @@ module soap_turbo_angular
                               scaling, do_derivatives, prefl_rad_der, eimphi_rad_der, eimphi_azi_der, &
                               prefl_new, prefl_der_new )
     implicit none
-    real(dp), intent(in) :: rj, atom_sigma, scaling
-    complex(dp) :: eimphi(:), eimphi_rad_der(:), eimphi_azi_der(:)
-    real(dp) :: phi, rjbysigma, pref, cosm2, sinm2, cosm1, sinm1, cos0, sin0, cosphi2
-    integer :: lmax, l, m, k
-    real(dp) :: prefl_der_new(0:), prefl_new(0:)
-    real(dp) :: prefl(0:), fact_array(:), prefl_rad_der(0:), pref_rad_der
-    complex(dp) :: prefm(0:)
-    logical, intent(in) :: do_derivatives
+ real(dp), intent(in) :: rj
+ real(dp), intent(in) :: atom_sigma
+ real(dp), intent(in) :: scaling
+ complex(dp) :: eimphi(:)
+ complex(dp) :: eimphi_rad_der(:)
+ complex(dp) :: eimphi_azi_der(:)
+ real(dp) :: phi
+ real(dp) :: rjbysigma
+ real(dp) :: pref
+ real(dp) :: cosm2
+ real(dp) :: sinm2
+ real(dp) :: cosm1
+ real(dp) :: sinm1
+ real(dp) :: cos0
+ real(dp) :: sin0
+ real(dp) :: cosphi2
+ integer :: lmax
+ integer :: l
+ integer :: m
+ integer :: k
+ real(dp) :: prefl_der_new(0:)
+ real(dp) :: prefl_new(0:)
+ real(dp) :: prefl(0:)
+ real(dp) :: fact_array(:)
+ real(dp) :: prefl_rad_der(0:)
+ real(dp) :: pref_rad_der
+ complex(dp) :: prefm(0:)
+ logical, intent(in) :: do_derivatives
 
     rjbysigma = rj/atom_sigma
 
@@ -278,9 +317,19 @@ module soap_turbo_angular
   subroutine get_ilexp(ilexp_array, fact_array, lmax, x)
     implicit none
 
-    real(dp) :: ilexp_array(0:), x, x2, x4, fl, flm1, flm2, xcut = 1.d-7, fact
-    integer :: l, i, lmax
-    real(dp) :: fact_array(:)
+ real(dp) :: ilexp_array(0:)
+ real(dp) :: x
+ real(dp) :: x2
+ real(dp) :: x4
+ real(dp) :: fl
+ real(dp) :: flm1
+ real(dp) :: flm2
+ real(dp) :: xcut = 1.d-7
+ real(dp) :: fact
+ integer :: l
+ integer :: i
+ integer :: lmax
+ real(dp) :: fact_array(:)
 
     if( lmax < 0 )then
       write(*,*) "Bad argument (l<0) for function ilexp_double!"
@@ -352,11 +401,15 @@ module soap_turbo_angular
   subroutine get_ilexp_der(ilexp_array, lmax, rj, atom_sigma, scaling, ilexp_array_der)
     implicit none
 
-    real(dp), intent(in) :: ilexp_array(0:), rj, atom_sigma, scaling
-    integer, intent(in) :: lmax
-    real(dp), intent(inout) :: ilexp_array_der(0:)
-    integer :: l
-    real(dp) :: coeff1, coeff2
+ real(dp), intent(in) :: ilexp_array(0:)
+ real(dp), intent(in) :: rj
+ real(dp), intent(in) :: atom_sigma
+ real(dp), intent(in) :: scaling
+ integer, intent(in) :: lmax
+ real(dp), intent(inout) :: ilexp_array_der(0:)
+ integer :: l
+ real(dp) :: coeff1
+ real(dp) :: coeff2
 
     coeff1 = 2.d0*rj/atom_sigma**2
     coeff2 = 1.d0 - scaling*rj/atom_sigma
@@ -463,52 +516,52 @@ module soap_turbo_angular
     implicit none
     
     ! Input variables 
-    integer, intent(in) :: lmax
-    integer, intent(in) :: n_atom_pairs
-    integer, intent(in) :: n_species
+ integer, intent(in) :: lmax
+ integer, intent(in) :: n_atom_pairs
+ integer, intent(in) :: n_species
 
-    logical, intent(in) :: do_derivatives
+ logical, intent(in) :: do_derivatives
 
-    real(dp), intent(in) :: rcut
+ real(dp), intent(in) :: rcut
     
     ! Internal variables
-    integer :: kmax
-    integer :: kmax_der
-    integer :: lmpo
-    complex(dp) :: c
-    logical(c_bool) :: c_do_derivatives
+ integer :: kmax
+ integer :: kmax_der
+ integer :: lmpo
+ complex(dp) :: c
+ logical(c_bool) :: c_do_derivatives
 
     ! Input GPU pointers
-    type(c_ptr), intent(inout) :: atom_sigma_in_d
-    type(c_ptr), intent(inout) :: atom_sigma_scaling_d
-    type(c_ptr), intent(inout) :: exp_coeff_azi_der_d
-    type(c_ptr), intent(inout) :: exp_coeff_d
-    type(c_ptr), intent(inout) :: exp_coeff_pol_der_d
-    type(c_ptr), intent(inout) :: exp_coeff_rad_der_d
-    type(c_ptr), intent(inout) :: mask_d
-    type(c_ptr), intent(inout) :: phis_d
-    type(c_ptr), intent(inout) :: preflm_d
-    type(c_ptr), intent(inout) :: rjs_d
-    type(c_ptr), intent(inout) :: thetas_d
-    type(c_ptr), intent(inout) :: gpu_stream
+ type(c_ptr), intent(inout) :: atom_sigma_in_d
+ type(c_ptr), intent(inout) :: atom_sigma_scaling_d
+ type(c_ptr), intent(inout) :: exp_coeff_azi_der_d
+ type(c_ptr), intent(inout) :: exp_coeff_d
+ type(c_ptr), intent(inout) :: exp_coeff_pol_der_d
+ type(c_ptr), intent(inout) :: exp_coeff_rad_der_d
+ type(c_ptr), intent(inout) :: mask_d
+ type(c_ptr), intent(inout) :: phis_d
+ type(c_ptr), intent(inout) :: preflm_d
+ type(c_ptr), intent(inout) :: rjs_d
+ type(c_ptr), intent(inout) :: thetas_d
+ type(c_ptr), intent(inout) :: gpu_stream
 
     ! Internal GPU pointers 
-    type(c_ptr) :: eimphi_azi_der_global_d
-    type(c_ptr) :: eimphi_global_d
-    type(c_ptr) :: eimphi_rad_der_global_d
-    type(c_ptr) :: plm_array_der_global_d
-    type(c_ptr) :: plm_array_der_mul_sin_d
-    type(c_ptr) :: plm_array_div_sin_d
-    type(c_ptr) :: plm_array_global_d
-    type(c_ptr) :: prefl_array_global_d
-    type(c_ptr) :: prefl_array_global_der_d
+ type(c_ptr) :: eimphi_azi_der_global_d
+ type(c_ptr) :: eimphi_global_d
+ type(c_ptr) :: eimphi_rad_der_global_d
+ type(c_ptr) :: plm_array_der_global_d
+ type(c_ptr) :: plm_array_der_mul_sin_d
+ type(c_ptr) :: plm_array_div_sin_d
+ type(c_ptr) :: plm_array_global_d
+ type(c_ptr) :: prefl_array_global_d
+ type(c_ptr) :: prefl_array_global_der_d
 
     
     ! Internal GPU sizes
-    integer(c_size_t) :: st_eimphi_global
-    integer(c_size_t) :: st_plm_array_der_global
-    integer(c_size_t) :: st_plm_array_global
-    integer(c_size_t) :: st_prefl_array_global
+ integer(c_size_t) :: st_eimphi_global
+ integer(c_size_t) :: st_plm_array_der_global
+ integer(c_size_t) :: st_plm_array_global
+ integer(c_size_t) :: st_prefl_array_global
 
 
     
