@@ -402,7 +402,7 @@ module soap_turbo_desc
 
   st_size_preflm=k_max*sizeof(preflm(1))
 
-  call gpu_malloc_all(preflm_d,st_size_preflm, gpu_stream)
+  call gpu_malloc_async(preflm_d,st_size_preflm, gpu_stream)
   call cpy_htod( c_loc(preflm), preflm_d, st_size_preflm, gpu_stream)
 
   if( do_derivatives )then
@@ -442,8 +442,8 @@ module soap_turbo_desc
     st_W_d = n_max*n_max*c_double
     st_S_d = n_max*n_max*c_double
 
-    call gpu_malloc_all(W_d,size_tmp_var, gpu_stream)
-    call gpu_malloc_all(S_d,size_tmp_var, gpu_stream)
+    call gpu_malloc_async(W_d,size_tmp_var, gpu_stream)
+    call gpu_malloc_async(S_d,size_tmp_var, gpu_stream)
 
     tmp_cint_val = 0
 
@@ -626,12 +626,12 @@ time2 = MPI_wtime()
     enddo
   enddo
   st_mask_d= n_atom_pairs*n_species*sizeof(new_mask(1,1))
-  call gpu_malloc_all(mask_d, st_mask_d, gpu_stream)
+  call gpu_malloc_async(mask_d, st_mask_d, gpu_stream)
   call cpy_htod(c_loc(new_mask), mask_d, st_mask_d, gpu_stream)
   if( allocated( new_mask ) ) deallocate( new_mask )
 
   st_do_central_d= n_species*sizeof(do_central(1))
-  call gpu_malloc_all(do_central_d, st_do_central_d, gpu_stream)
+  call gpu_malloc_async(do_central_d, st_do_central_d, gpu_stream)
   call cpy_htod(c_loc(do_central), do_central_d, st_do_central_d, gpu_stream)
 
   size_rcut_hard=size(rcut_hard,1)
@@ -647,32 +647,32 @@ time2 = MPI_wtime()
   ntemp_der_d=ntemp_der*n_atom_pairs*sizeof(radial_exp_coeff_der(1,1))
   st_rad_exp_coeff_der_double=n_max*n_atom_pairs*sizeof(radial_exp_coeff_der(1,1))
 
-  call gpu_malloc_all(radial_exp_coeff_d, st_rad_exp_coeff_der_double, gpu_stream)
+  call gpu_malloc_async(radial_exp_coeff_d, st_rad_exp_coeff_der_double, gpu_stream)
   call gpu_memset_async(radial_exp_coeff_d,0, st_rad_exp_coeff_der_double, gpu_stream)
-  call gpu_malloc_all(radial_exp_coeff_temp1_d, ntemp_d, gpu_stream)
-  call gpu_malloc_all(radial_exp_coeff_temp2_d, ntemp_d, gpu_stream)
+  call gpu_malloc_async(radial_exp_coeff_temp1_d, ntemp_d, gpu_stream)
+  call gpu_malloc_async(radial_exp_coeff_temp2_d, ntemp_d, gpu_stream)
 
 !  if (do_derivatives)then 
-     call gpu_malloc_all(radial_exp_coeff_der_d, st_rad_exp_coeff_der_double, gpu_stream)
+     call gpu_malloc_async(radial_exp_coeff_der_d, st_rad_exp_coeff_der_double, gpu_stream)
      call gpu_memset_async(radial_exp_coeff_der_d,0, st_rad_exp_coeff_der_double, gpu_stream)
      !call cpy_htod(c_loc(radial_exp_coeff_der),radial_exp_coeff_der_d, st_rad_exp_coeff_der_double, gpu_stream)
-     call gpu_malloc_all(radial_exp_coeff_der_temp_d, ntemp_der_d , gpu_stream) 
+     call gpu_malloc_async(radial_exp_coeff_der_temp_d, ntemp_der_d , gpu_stream) 
 !  end if
   
   size_i_beg=size(i_beg,1)
   st_size_i_beg=size_i_beg*sizeof(i_beg(1))
-  call gpu_malloc_all(i_beg_d, st_size_i_beg, gpu_stream)
+  call gpu_malloc_async(i_beg_d, st_size_i_beg, gpu_stream)
   call cpy_htod(c_loc(i_beg),i_beg_d,st_size_i_beg, gpu_stream)
 
   size_i_end=size(i_end,1)
   st_size_i_end=size_i_end*sizeof(i_end(1))
-  call gpu_malloc_all(i_end_d, st_size_i_end, gpu_stream)
+  call gpu_malloc_async(i_end_d, st_size_i_end, gpu_stream)
   call cpy_htod(c_loc(i_end),i_end_d,st_size_i_end, gpu_stream)
 
-  call gpu_malloc_all(rjs_d,st_n_atom_pairs_double, gpu_stream)
+  call gpu_malloc_async(rjs_d,st_n_atom_pairs_double, gpu_stream)
   call cpy_htod(c_loc(rjs),rjs_d, st_n_atom_pairs_double,gpu_stream)
 
-  call gpu_malloc_all(n_neigh_d,st_n_sites_int,gpu_stream)
+  call gpu_malloc_async(n_neigh_d,st_n_sites_int,gpu_stream)
   call cpy_htod(c_loc(n_neigh),n_neigh_d, st_n_sites_int,gpu_stream)
 
   mode = 0
@@ -717,11 +717,11 @@ time2 = MPI_wtime()
   enddo
    
   
-  call gpu_malloc_all(k2_start_d,st_n_sites_int,gpu_stream)
+  call gpu_malloc_async(k2_start_d,st_n_sites_int,gpu_stream)
   call cpy_htod(c_loc(k2_start), k2_start_d, st_n_sites_int, gpu_stream)
 
 
-  call gpu_malloc_all(k2_i_site_d,st_n_atom_pairs_int,gpu_stream)
+  call gpu_malloc_async(k2_i_site_d,st_n_atom_pairs_int,gpu_stream)
   call cpy_htod(c_loc(k2_i_site),k2_i_site_d, st_n_atom_pairs_int, gpu_stream)
   
   if( do_timing )then
@@ -734,19 +734,19 @@ time2 = MPI_wtime()
     time1 = time2
   end if
 
-  call gpu_malloc_all(phis_d,st_n_atom_pairs_double, gpu_stream)
+  call gpu_malloc_async(phis_d,st_n_atom_pairs_double, gpu_stream)
   call cpy_htod(c_loc(phis),phis_d, st_n_atom_pairs_double, gpu_stream) 
-  call gpu_malloc_all(thetas_d,st_n_atom_pairs_double, gpu_stream)
+  call gpu_malloc_async(thetas_d,st_n_atom_pairs_double, gpu_stream)
   call cpy_htod(c_loc(thetas),thetas_d, st_n_atom_pairs_double, gpu_stream)
 
   st_size_angular_exp_coeff=k_max*n_atom_pairs*sizeof(angular_exp_coeff(1,1))
-  call gpu_malloc_all(angular_exp_coeff_d,st_size_angular_exp_coeff,gpu_stream) 
+  call gpu_malloc_async(angular_exp_coeff_d,st_size_angular_exp_coeff,gpu_stream) 
 
   if (do_derivatives) then 
      st_ang_exp_coeff_rad_der=k_max*n_atom_pairs*sizeof(angular_exp_coeff_rad_der(1,1))
-     call gpu_malloc_all(angular_exp_coeff_rad_der_d,st_ang_exp_coeff_rad_der,gpu_stream)
-     call gpu_malloc_all(angular_exp_coeff_azi_der_d,st_ang_exp_coeff_rad_der,gpu_stream)
-     call gpu_malloc_all(angular_exp_coeff_pol_der_d,st_ang_exp_coeff_rad_der,gpu_stream)
+     call gpu_malloc_async(angular_exp_coeff_rad_der_d,st_ang_exp_coeff_rad_der,gpu_stream)
+     call gpu_malloc_async(angular_exp_coeff_azi_der_d,st_ang_exp_coeff_rad_der,gpu_stream)
+     call gpu_malloc_async(angular_exp_coeff_pol_der_d,st_ang_exp_coeff_rad_der,gpu_stream)
   end if
   
 
@@ -814,20 +814,20 @@ time1 = MPI_wtime()
   
   st_cnk=k_max*n_max*n_sites*sizeof(cnk(1,1,1))
 
-  call gpu_malloc_all(cnk_d,st_cnk,gpu_stream) 
+  call gpu_malloc_async(cnk_d,st_cnk,gpu_stream) 
    
   
   size_1_species=size(species,1)
   size_2_species=size(species,2)
   st_size_species=size_1_species*size_2_species*sizeof(species(1,1))
 
-  call gpu_malloc_all(species_d, st_size_species,gpu_stream)
+  call gpu_malloc_async(species_d, st_size_species,gpu_stream)
   call cpy_htod(c_loc(species),species_d,st_size_species, gpu_stream)
 
   size_species_multiplicity=size(species_multiplicity,1)
   st_size_species_multiplicity=size_species_multiplicity*sizeof(species_multiplicity(1))
 
-  call gpu_malloc_all(species_multiplicity_d,st_size_species_multiplicity,gpu_stream)
+  call gpu_malloc_async(species_multiplicity_d,st_size_species_multiplicity,gpu_stream)
   call cpy_htod(c_loc(species_multiplicity), species_multiplicity_d, &
                                      st_size_species_multiplicity,gpu_stream)
   
@@ -853,9 +853,9 @@ time1 = MPI_wtime()
      pi = dacos(-1.d0)
 
      st_cnk_rap_der=k_max*n_max*n_atom_pairs*sizeof(cnk_rad_der(1,1,1))
-     call gpu_malloc_all(cnk_rad_der_d,st_cnk_rap_der,gpu_stream)
-     call gpu_malloc_all(cnk_azi_der_d,st_cnk_rap_der,gpu_stream)
-     call gpu_malloc_all(cnk_pol_der_d,st_cnk_rap_der,gpu_stream)
+     call gpu_malloc_async(cnk_rad_der_d,st_cnk_rap_der,gpu_stream)
+     call gpu_malloc_async(cnk_azi_der_d,st_cnk_rap_der,gpu_stream)
+     call gpu_malloc_async(cnk_pol_der_d,st_cnk_rap_der,gpu_stream)
 
      call gpu_get_derivatives(radial_exp_coeff_d, angular_exp_coeff_d, radial_exp_coeff_der_d, &
           angular_exp_coeff_rad_der_d, angular_exp_coeff_azi_der_d, angular_exp_coeff_pol_der_d, &
@@ -983,15 +983,15 @@ time1 = MPI_wtime()
    st_n_multiplicity_double=n_multiplicity*sizeof(multiplicity_array(1))
    st_multiplicity_array_d = st_n_multiplicity_double
 
-   call gpu_malloc_all(multiplicity_array_d, st_n_multiplicity_double,gpu_stream)
+   call gpu_malloc_async(multiplicity_array_d, st_n_multiplicity_double,gpu_stream)
    call cpy_htod(c_loc( multiplicity_array), multiplicity_array_d, st_n_multiplicity_double, gpu_stream)
      
   end if
   recompute_basis = .false.
 
   
-  call gpu_malloc_all(sqrt_dot_p_d, st_n_sites_double,gpu_stream)
-  call gpu_malloc_all(skip_soap_component_d, st_skip_component,gpu_stream)
+  call gpu_malloc_async(sqrt_dot_p_d, st_n_sites_double,gpu_stream)
+  call gpu_malloc_async(skip_soap_component_d, st_skip_component,gpu_stream)
   call cpy_htod(c_loc(skip_soap_component), skip_soap_component_d, st_skip_component,gpu_stream)
 
   
@@ -1030,15 +1030,15 @@ time1 = MPI_wtime()
 
 
 
-     call gpu_malloc_all(i_k2_start_d,st_n_sites_int,gpu_stream)
+     call gpu_malloc_async(i_k2_start_d,st_n_sites_int,gpu_stream)
      call cpy_htod(c_loc(i_k2_start),i_k2_start_d,st_n_sites_int, gpu_stream)
 
-     call gpu_malloc_all(k3_index_d,st_n_atom_pairs_int,gpu_stream)
+     call gpu_malloc_async(k3_index_d,st_n_atom_pairs_int,gpu_stream)
      call cpy_htod(c_loc(k3_index),k3_index_d, st_n_atom_pairs_int, gpu_stream)
      !call cpy_htod(c_loc(soap_cart_der),soap_cart_der_d, st_soap_cart_der)
-     call gpu_malloc_all(soap_rad_der_d, st_soap_rap_der,gpu_stream)
-     call gpu_malloc_all(soap_azi_der_d, st_soap_rap_der,gpu_stream)
-     call gpu_malloc_all(soap_pol_der_d, st_soap_rap_der,gpu_stream)
+     call gpu_malloc_async(soap_rad_der_d, st_soap_rap_der,gpu_stream)
+     call gpu_malloc_async(soap_azi_der_d, st_soap_rap_der,gpu_stream)
+     call gpu_malloc_async(soap_pol_der_d, st_soap_rap_der,gpu_stream)
 
 
      call gpu_get_soap_der(soap_d, sqrt_dot_p_d, soap_cart_der_d, &

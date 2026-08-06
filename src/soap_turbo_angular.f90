@@ -581,18 +581,18 @@ module soap_turbo_angular
     st_plm_array_global= kmax*n_atom_pairs*sizeof(rcut) !c_double !sizeof(rcut)
     st_eimphi_global = kmax*n_atom_pairs * sizeof(c) !c_double_complex !sizeof(exp_coeff(1,1))
     
-    call gpu_malloc_all(prefl_array_global_d, st_prefl_array_global,gpu_stream) 
-    call gpu_malloc_all(plm_array_global_d, st_plm_array_global,gpu_stream) 
-    call gpu_malloc_all(eimphi_global_d, st_eimphi_global,gpu_stream)
+    call gpu_malloc_async(prefl_array_global_d, st_prefl_array_global,gpu_stream) 
+    call gpu_malloc_async(plm_array_global_d, st_plm_array_global,gpu_stream) 
+    call gpu_malloc_async(eimphi_global_d, st_eimphi_global,gpu_stream)
 
     if(do_derivatives) then
-       call gpu_malloc_all(prefl_array_global_der_d, st_prefl_array_global,gpu_stream) 
+       call gpu_malloc_async(prefl_array_global_der_d, st_prefl_array_global,gpu_stream) 
 
-       call gpu_malloc_all(eimphi_rad_der_global_d, st_eimphi_global ,gpu_stream) 
-       call gpu_malloc_all(eimphi_azi_der_global_d, st_eimphi_global,gpu_stream) 
+       call gpu_malloc_async(eimphi_rad_der_global_d, st_eimphi_global ,gpu_stream) 
+       call gpu_malloc_async(eimphi_azi_der_global_d, st_eimphi_global,gpu_stream) 
     
-       call gpu_malloc_all(plm_array_div_sin_d, st_plm_array_global,gpu_stream) 
-       call gpu_malloc_all(plm_array_der_mul_sin_d, st_plm_array_global,gpu_stream) 
+       call gpu_malloc_async(plm_array_div_sin_d, st_plm_array_global,gpu_stream) 
+       call gpu_malloc_async(plm_array_der_mul_sin_d, st_plm_array_global,gpu_stream) 
 
     endif
 
@@ -603,7 +603,7 @@ module soap_turbo_angular
     if(do_derivatives) then
        lmpo=lmax+1 
        st_plm_array_der_global= kmax_der*n_atom_pairs*sizeof(rcut)
-       call gpu_malloc_all(plm_array_der_global_d, st_plm_array_der_global, gpu_stream) 
+       call gpu_malloc_async(plm_array_der_global_d, st_plm_array_der_global, gpu_stream) 
        call gpu_get_plm_array_global(plm_array_der_global_d, n_atom_pairs, kmax_der, &
             lmpo, thetas_d, gpu_stream )
 
