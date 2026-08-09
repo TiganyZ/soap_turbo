@@ -497,13 +497,18 @@ module soap_turbo_desc
   end if
 
   ! This is for the expansion coefficients and the soap vectors
-  allocate( radial_exp_coeff(1:n_max, 1:n_atom_pairs) )
-  allocate( angular_exp_coeff(1:k_max, 1:n_atom_pairs) )
-  allocate( cnk( 1:k_max, 1:n_max, 1:n_sites) )
-
-  radial_exp_coeff=0.d0
-  angular_exp_coeff = 0.d0
-  cnk = 0.d0
+! On this branch these three are DUMMIES. The device computes and holds the
+! coefficients (radial_exp_coeff_d, angular_exp_coeff_d, cnk_d, allocated
+! below); the host copies were read only by get_derivatives, which this branch
+! does not call. At their real size they cost n_max*8 + k_max*16 bytes per pair
+! plus k_max*n_max*16 bytes per site, and the three memsets that followed
+! touched every page of that once per batch.
+!
+! The leading extents stay so the sizeof(x(1,1)) expressions that size the
+! DEVICE buffers keep working; only the extent over pairs and sites goes.
+  allocate( radial_exp_coeff(1:n_max, 1:1) )
+  allocate( angular_exp_coeff(1:k_max, 1:1) )
+  allocate( cnk( 1:k_max, 1:n_max, 1:1) )
 
   ! Handle SOAP compression here
   allocate( skip_soap_component(0:l_max, 1:n_max, 1:n_max) )
@@ -567,17 +572,25 @@ time2 = MPI_wtime()
 
   ! sqrt_dot_p = 0.d0
   if( do_derivatives )then
-     allocate( radial_exp_coeff_der(1:n_max, 1:n_atom_pairs) )
-     ! These angular arrays are not used below in the gpu branch, they should be cleaned up 
-    allocate( angular_exp_coeff_rad_der(1:k_max, 1:n_atom_pairs) )
-    allocate( angular_exp_coeff_azi_der(1:k_max, 1:n_atom_pairs) )
-    allocate( angular_exp_coeff_pol_der(1:k_max, 1:n_atom_pairs) )
-    allocate( cnk_rad_der( 1:k_max, 1:n_max, 1:n_atom_pairs) )
-    allocate( cnk_azi_der( 1:k_max, 1:n_max, 1:n_atom_pairs) )
-    allocate( cnk_pol_der( 1:k_max, 1:n_max, 1:n_atom_pairs) )
-    allocate( soap_rad_der(1:n_soap, 1:n_atom_pairs) )
-    allocate( soap_azi_der(1:n_soap, 1:n_atom_pairs) )
-    allocate( soap_pol_der(1:n_soap, 1:n_atom_pairs) )
+     allocate( radial_exp_coeff_der(1:n_max, 1:1) )
+     ! Dummies, all of them, for the reason given at the coefficient allocation
+     ! above: these are computed and consumed on the device, and the only host
+     ! reader is get_derivatives, which this branch never calls. At full size
+     ! they come to about 28 kB per atom pair -- the largest single host cost in
+     ! the SOAP path, and one paid once per batch. The leading extents are kept
+     ! for the sizeof(x(1,1)) that size the device buffers.
+     !
+     ! Restoring them is a one-line-each change, and the `if( .false. )` debug
+     ! dump further down needs exactly that before it can be switched on.
+    allocate( angular_exp_coeff_rad_der(1:k_max, 1:1) )
+    allocate( angular_exp_coeff_azi_der(1:k_max, 1:1) )
+    allocate( angular_exp_coeff_pol_der(1:k_max, 1:1) )
+    allocate( cnk_rad_der( 1:k_max, 1:n_max, 1:1) )
+    allocate( cnk_azi_der( 1:k_max, 1:n_max, 1:1) )
+    allocate( cnk_pol_der( 1:k_max, 1:n_max, 1:1) )
+    allocate( soap_rad_der(1:n_soap, 1:1) )
+    allocate( soap_azi_der(1:n_soap, 1:1) )
+    allocate( soap_pol_der(1:n_soap, 1:1) )
     ! radial_exp_coeff_der = 0.d0
     ! angular_exp_coeff_rad_der = 0.d0
     ! angular_exp_coeff_azi_der = 0.d0
