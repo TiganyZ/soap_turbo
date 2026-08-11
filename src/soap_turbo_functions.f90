@@ -78,7 +78,7 @@ module soap_turbo_functions
 !   l is > 0, m can take values from 0 to l and x is within the [-1, 1] domain
     implicit none
     integer :: l, m, i, l2
-    real*4 :: plm_single, x, dfact_arg, pl2m, pmm, pmp1m, sq
+    real(sp) :: plm_single, x, dfact_arg, pl2m, pmm, pmp1m, sq
     if(l < 0 .or. m < 0 .or. m > l .or. abs(x) > 1.)then
         write(*,*) "Bad arguments for associated Legendre polynomial"
     end if

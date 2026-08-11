@@ -29,6 +29,14 @@ module soap_turbo_radial
   use mod_types
   use soap_turbo_functions
 
+! private so a module that uses another does not inherit a second copy
+  integer, parameter, private :: sp  = real32
+  integer, parameter, private :: dp  = real64
+  integer, parameter, private :: i32 = int32
+  integer, parameter, private :: i64 = int64
+  private :: real32, real64, int32, int64
+
+
   contains
 
 !**************************************************************************
