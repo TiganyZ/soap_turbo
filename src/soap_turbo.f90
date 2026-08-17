@@ -40,8 +40,56 @@ module soap_turbo_desc
   integer, parameter, private :: i64 = int64
   private :: real32, real64, int32, int64
 
+! ---------------------------------------------------------------------------
+! Persistent work buffers.
+!
+! get_soap is called once per batch of sites, and the arrays whose second
+! dimension is n_atom_pairs are large: cnk_rad_der and friends are
+! (k_max, n_max, n_atom_pairs) complex, a few hundred MB apiece for l_max = 8.
+! Allocating and freeing them per call means faulting in the better part of a
+! gigabyte of fresh pages on every batch, which is where the time attributed to
+! "Memory allocation" actually went -- not in malloc, in the page faults.
+!
+! Keeping them here, grown but never shrunk, faults those pages once for the
+! whole run. The peak footprint is unchanged, which is what the batching is
+! there to bound. Views of the exact shape are taken with pointer rank
+! remapping, so the code below is written against the same shapes as before.
+! ---------------------------------------------------------------------------
+  real(dp),    allocatable, save, target, private :: wr_rad(:), wr_rad_der(:)
+  real(dp),    allocatable, save, target, private :: wr_soap_rad(:), wr_soap_azi(:), wr_soap_pol(:)
+  complex(dp), allocatable, save, target, private :: wc_ang(:), wc_ang_rad(:), wc_ang_azi(:), wc_ang_pol(:)
+  complex(dp), allocatable, save, target, private :: wc_cnk(:)
 
   contains
+
+!**************************************************************************
+! Grow-only reallocation of the persistent buffers above.
+  subroutine ensure_real_buffer(buf, n)
+    implicit none
+    real(dp), allocatable, intent(inout) :: buf(:)
+    integer(i64), intent(in) :: n
+    if( allocated(buf) )then
+      if( size(buf, kind=i64) >= n ) return
+      deallocate( buf )
+    end if
+    allocate( buf(1:n) )
+  return
+  end subroutine
+!**************************************************************************
+
+!**************************************************************************
+  subroutine ensure_complex_buffer(buf, n)
+    implicit none
+    complex(dp), allocatable, intent(inout) :: buf(:)
+    integer(i64), intent(in) :: n
+    if( allocated(buf) )then
+      if( size(buf, kind=i64) >= n ) return
+      deallocate( buf )
+    end if
+    allocate( buf(1:n) )
+  return
+  end subroutine
+!**************************************************************************
 
 !**************************************************************************
   subroutine get_soap(n_sites, n_neigh, n_species, species, species_multiplicity, n_atom_pairs, mask, rjs, &
@@ -76,19 +124,26 @@ module soap_turbo_desc
 
 !-------------------
 ! Internal variables
-  complex(dp), allocatable :: angular_exp_coeff(:,:), cnk(:,:,:)
-  complex(dp), allocatable :: angular_exp_coeff_rad_der(:,:), angular_exp_coeff_azi_der(:,:), cnk_rad_der(:,:,:)
-  complex(dp), allocatable :: cnk_azi_der(:,:,:), angular_exp_coeff_pol_der(:,:), cnk_pol_der(:,:,:)
+  complex(dp), pointer, contiguous :: angular_exp_coeff(:,:), cnk(:,:,:)
+  complex(dp), pointer, contiguous :: angular_exp_coeff_rad_der(:,:), angular_exp_coeff_azi_der(:,:)
+  complex(dp), pointer, contiguous :: angular_exp_coeff_pol_der(:,:)
   complex(dp), allocatable :: eimphi(:), prefm(:), eimphi_rad_der(:)
 
   real(dp), allocatable, save :: W(:,:), S(:,:), multiplicity_array(:), atom_sigma_r_prev(:), rcut_hard_prev(:)
-  real(dp), allocatable :: soap_rad_der(:,:), sqrt_dot_p(:), soap_azi_der(:,:)
+  real(dp), pointer, contiguous :: soap_rad_der(:,:), soap_azi_der(:,:), soap_pol_der(:,:)
+  real(dp), allocatable :: sqrt_dot_p(:)
   real(dp), allocatable :: W_temp(:,:), S_temp(:,:)
-  real(dp), allocatable :: radial_exp_coeff(:,:), soap_pol_der(:,:)
+  real(dp), pointer, contiguous :: radial_exp_coeff(:,:), radial_exp_coeff_der(:,:)
   real(dp), allocatable :: preflm(:), plm_array(:), prefl(:), fact_array(:), prefl_rad_der(:)
-  real(dp), allocatable :: radial_exp_coeff_der(:,:)
-  real(dp), allocatable :: this_soap(:), this_soap_rad_der(:), this_soap_azi_der(:), this_soap_pol_der(:)
-  real(dp) :: amplitude, multiplicity, pi, rcut_max
+  real(dp), allocatable :: this_soap(:)
+  real(dp) :: amplitude, multiplicity, pi, rcut_max, fourpi_rad
+! Real and imaginary parts held explicitly, so that the SOAP contractions below
+! can be written as the dot products they are instead of as complex products
+! whose imaginary half is then thrown away.
+  real(dp) :: un_r, un_i, up_r, up_i, dn_r, dn_i, dp_r, dp_i
+  real(dp) :: acc_val, acc_rad, acc_azi, acc_pol
+  real(dp) :: inv_p, inv_p3, dot_r, dot_a, dot_o, sv, vr, va, vo
+  real(dp) :: sin_t, cos_t, sin_f, cos_f, inv_r, cx, cy, cz, px, py, pz, ax, ay
   real(dp) :: radial_time, angular_time, coeff_time, time3, total_time, soap_time, time1, time2, compress_time, &
             memory_time, basis_time
 
@@ -96,7 +151,8 @@ module soap_turbo_desc
   integer, allocatable, save :: alpha_max_prev(:)
   integer, save :: n_max_prev, l_max_prev
   integer :: k_max, n_max
-  integer :: i, counter, j, k, n_soap, k2, k3, n, l, m, np, counter2, n_soap_uncompressed
+  integer(i64) :: nb_pair
+  integer :: i, counter, j, k, n_soap, k2, k3, n, l, m, np, counter2, n_soap_uncompressed, kbase
   logical, allocatable :: do_central(:), skip_soap_component(:,:,:), skip_soap_component_flattened(:)
   logical, allocatable, save :: skip_soap_component_flattened_prev(:)
   logical, save :: recompute_basis = .true., recompute_multiplicity_array = .true.
@@ -280,11 +336,17 @@ module soap_turbo_desc
   n_soap_uncompressed = n_max*(n_max+1)/2 * (l_max+1)
 
 ! This is for the expansion coefficients and the soap vectors
-  allocate( radial_exp_coeff(1:n_max, 1:n_atom_pairs) )
-  radial_exp_coeff = 0.d0
-  allocate( angular_exp_coeff(1:k_max, 1:n_atom_pairs) )
-  angular_exp_coeff = 0.d0
-  allocate( cnk( 1:k_max, 1:n_max, 1:n_sites) )
+! radial_exp_coeff and angular_exp_coeff are not cleared here: the radial
+! routines clear their own species block and the angular routine writes every
+! column it does not clear itself, so a sweep here would only be a second pass
+! over the same memory. cnk is accumulated over neighbours, so it does need it.
+  nb_pair = int(n_atom_pairs, i64)
+  call ensure_real_buffer   ( wr_rad, int(n_max,i64)*nb_pair )
+  call ensure_complex_buffer( wc_ang, int(k_max,i64)*nb_pair )
+  call ensure_complex_buffer( wc_cnk, int(k_max,i64)*int(n_max,i64)*int(n_sites,i64) )
+  radial_exp_coeff (1:n_max, 1:n_atom_pairs)          => wr_rad(1:int(n_max,i64)*nb_pair)
+  angular_exp_coeff(1:k_max, 1:n_atom_pairs)          => wc_ang(1:int(k_max,i64)*nb_pair)
+  cnk              (1:k_max, 1:n_max, 1:n_sites)      => wc_cnk(1:int(k_max,i64)*int(n_max,i64)*int(n_sites,i64))
   cnk = 0.d0
 ! Handle SOAP compression here
   allocate( skip_soap_component_flattened(1:n_soap_uncompressed) )
@@ -315,29 +377,30 @@ module soap_turbo_desc
   allocate( sqrt_dot_p(1:n_sites) )
   sqrt_dot_p = 0.d0
   if( do_derivatives )then
-    allocate( radial_exp_coeff_der(1:n_max, 1:n_atom_pairs) )
-    allocate( angular_exp_coeff_rad_der(1:k_max, 1:n_atom_pairs) )
-    allocate( angular_exp_coeff_azi_der(1:k_max, 1:n_atom_pairs) )
-    allocate( angular_exp_coeff_pol_der(1:k_max, 1:n_atom_pairs) )
-    allocate( cnk_rad_der( 1:k_max, 1:n_max, 1:n_atom_pairs) )
-    allocate( cnk_azi_der( 1:k_max, 1:n_max, 1:n_atom_pairs) )
-    allocate( cnk_pol_der( 1:k_max, 1:n_max, 1:n_atom_pairs) )
-    allocate( soap_rad_der(1:n_soap, 1:n_atom_pairs) )
-    allocate( soap_azi_der(1:n_soap, 1:n_atom_pairs) )
-    allocate( soap_pol_der(1:n_soap, 1:n_atom_pairs) )
-    radial_exp_coeff_der = 0.d0
-    angular_exp_coeff_rad_der = 0.d0
-    angular_exp_coeff_azi_der = 0.d0
-    angular_exp_coeff_pol_der = 0.d0
-    cnk_rad_der = 0.d0
-    soap_rad_der = 0.d0
-    cnk_azi_der = 0.d0
-    soap_azi_der = 0.d0
-    cnk_pol_der = 0.d0
-    soap_pol_der = 0.d0
+    call ensure_real_buffer   ( wr_rad_der,  int(n_max,i64)*nb_pair )
+    call ensure_complex_buffer( wc_ang_rad,  int(k_max,i64)*nb_pair )
+    call ensure_complex_buffer( wc_ang_azi,  int(k_max,i64)*nb_pair )
+    call ensure_complex_buffer( wc_ang_pol,  int(k_max,i64)*nb_pair )
+    call ensure_real_buffer   ( wr_soap_rad, int(n_soap,i64)*nb_pair )
+    call ensure_real_buffer   ( wr_soap_azi, int(n_soap,i64)*nb_pair )
+    call ensure_real_buffer   ( wr_soap_pol, int(n_soap,i64)*nb_pair )
+    radial_exp_coeff_der     (1:n_max, 1:n_atom_pairs)        => wr_rad_der (1:int(n_max,i64)*nb_pair)
+    angular_exp_coeff_rad_der(1:k_max, 1:n_atom_pairs)        => wc_ang_rad (1:int(k_max,i64)*nb_pair)
+    angular_exp_coeff_azi_der(1:k_max, 1:n_atom_pairs)        => wc_ang_azi (1:int(k_max,i64)*nb_pair)
+    angular_exp_coeff_pol_der(1:k_max, 1:n_atom_pairs)        => wc_ang_pol (1:int(k_max,i64)*nb_pair)
+    soap_rad_der(1:n_soap, 1:n_atom_pairs)                    => wr_soap_rad(1:int(n_soap,i64)*nb_pair)
+    soap_azi_der(1:n_soap, 1:n_atom_pairs)                    => wr_soap_azi(1:int(n_soap,i64)*nb_pair)
+    soap_pol_der(1:n_soap, 1:n_atom_pairs)                    => wr_soap_pol(1:int(n_soap,i64)*nb_pair)
+!   Nothing is cleared here either. The radial and angular routines clear what
+!   they do not write; get_derivatives clears the cnk_*_der slab of any pair it
+!   skips; and every column of soap_*_der is either assigned outright or, in
+!   the compressed case, cleared just before it is accumulated into. For
+!   l_max = 8 and a 20k-pair batch these ten sweeps came to well over a
+!   gigabyte of stores per call, all of it overwritten immediately after.
   else
 !   We need this dummy variable defined here. Note the decreased range for the second index
-    allocate( radial_exp_coeff_der(1:n_max, 1:1) )
+    call ensure_real_buffer( wr_rad_der, int(n_max,i64) )
+    radial_exp_coeff_der(1:n_max, 1:1) => wr_rad_der(1:int(n_max,i64))
   end if
 
 
@@ -432,13 +495,14 @@ module soap_turbo_desc
   do i = 1, n_sites
     do j = 1, n_neigh(i)
       k2 = k2 + 1
+!     The l and m loops that used to be here just enumerate k = 1, k_max in
+!     order, since k = 1 + l*(l+1)/2 + m. Walking k directly makes the inner
+!     loop contiguous in both cnk and angular_exp_coeff.
       do n = 1, n_max
-        do l = 0, l_max
-          do m = 0, l
-            k = 1 + l*(l+1)/2 + m
-!           It is messy with the prefactor in spherical harmonics but we need to be sure because of the central atom below
-            cnk(k, n, i) = cnk(k, n, i) + 4.d0*pi * radial_exp_coeff(n, k2) * angular_exp_coeff(k, k2)
-          end do
+!       It is messy with the prefactor in spherical harmonics but we need to be sure because of the central atom below
+        fourpi_rad = 4.d0*pi * radial_exp_coeff(n, k2)
+        do k = 1, k_max
+          cnk(k, n, i) = cnk(k, n, i) + fourpi_rad * angular_exp_coeff(k, k2)
         end do
       end do
     end do
@@ -461,14 +525,10 @@ module soap_turbo_desc
     end do
   end do
 
-! Do derivatives
-  if( do_derivatives )then
-! Get the radial derivatives:
-    call get_derivatives(radial_exp_coeff, angular_exp_coeff, radial_exp_coeff_der, &
-                         angular_exp_coeff_rad_der, angular_exp_coeff_azi_der, angular_exp_coeff_pol_der, &
-                         n_sites, n_max, l_max, n_neigh, rjs, rcut_max, cnk_rad_der, cnk_azi_der, cnk_pol_der )
-  end if
-
+! cnk_rad_der / cnk_azi_der / cnk_pol_der used to be built here. They are not
+! built at all now: they factorise into the radial and angular expansions, and
+! soap_derivatives_from_expansion contracts those directly. See the comment
+! there.
   if( do_timing )then
     call cpu_time(time2)
     coeff_time = time2 - time1
@@ -550,8 +610,15 @@ module soap_turbo_desc
 
 
   allocate( this_soap(1:n_soap_uncompressed) )
+! The skipped components are the only ones the loop below does not assign, and
+! they are never read either -- the compressed path reads this_soap only at the
+! compress_P_j indices, which are exactly the components that are not skipped.
+! So they are cleared once here instead of the whole vector being cleared per
+! site.
+  do counter = 1, n_soap_uncompressed
+    if( skip_soap_component_flattened(counter) ) this_soap(counter) = 0.d0
+  end do
   do i = 1, n_sites
-    this_soap = 0.d0
     counter = 0
     counter2 = 0
     do n = 1, n_max
@@ -559,8 +626,10 @@ module soap_turbo_desc
         do l = 0, l_max
           counter = counter+1
           if( skip_soap_component_flattened(counter) )cycle
+          kbase = 1 + l*(l+1)/2
+          acc_val = 0.d0
           do m = 0, l
-            k = 1 + l*(l+1)/2 + m
+            k = kbase + m
             counter2 = counter2 + 1
 !            multiplicity = 1.d0
 !            if( n /= np )then
@@ -569,9 +638,14 @@ module soap_turbo_desc
 !            if( m > 0 )then
 !              multiplicity = multiplicity * 2.d0
 !            end if
-            multiplicity = multiplicity_array(counter2)
-            this_soap(counter) = this_soap(counter) + multiplicity * real(cnk(k, n, i) * conjg(cnk(k, np, i)))
+!           real(z1 * conjg(z2)) is Re(z1)Re(z2) + Im(z1)Im(z2); forming the
+!           whole complex product and dropping its imaginary part costs twice
+!           the multiplies.
+            un_r = dble(cnk(k, n, i));  un_i = aimag(cnk(k, n, i))
+            up_r = dble(cnk(k, np, i)); up_i = aimag(cnk(k, np, i))
+            acc_val = acc_val + multiplicity_array(counter2) * ( un_r*up_r + un_i*up_i )
           end do
+          this_soap(counter) = acc_val
         end do
       end do
     end do
@@ -600,102 +674,73 @@ module soap_turbo_desc
 
 ! call cpu_time(time1)
 !****************************
-    allocate( this_soap_rad_der(1:n_soap_uncompressed) )
-    allocate( this_soap_azi_der(1:n_soap_uncompressed) )
-    allocate( this_soap_pol_der(1:n_soap_uncompressed) )
+    call soap_derivatives_from_expansion(n_sites, n_neigh, n_max, l_max, n_soap, &
+                                        n_soap_uncompressed, cnk, angular_exp_coeff, &
+                                        angular_exp_coeff_rad_der, angular_exp_coeff_azi_der, &
+                                        angular_exp_coeff_pol_der, radial_exp_coeff, &
+                                        radial_exp_coeff_der, skip_soap_component_flattened, &
+                                        compress_soap, compress_P_nonzero, compress_P_i, &
+                                        compress_P_j, compress_P_el, soap_rad_der, soap_azi_der, &
+                                        soap_pol_der)
+!   Normalise and rotate to Cartesian. The normalised spherical components are
+!   consumed by the rotation in the same iteration, so they are kept in
+!   registers rather than written back to soap_*_der and read again; the two
+!   angles are evaluated once per pair instead of once per component
+!   expression; and the 1/sqrt_dot_p factors are reciprocals rather than
+!   n_soap divisions apiece.
     k2 = 0
+    k3 = 0
     do i = 1, n_sites
+      inv_p  = 1.d0 / sqrt_dot_p(i)
+      inv_p3 = 1.d0 / sqrt_dot_p(i)**3
       do j = 1, n_neigh(i)
-        this_soap_rad_der = 0.d0
-        this_soap_azi_der = 0.d0
-        this_soap_pol_der = 0.d0
         k2 = k2 + 1
-        counter = 0
-        counter2 = 0
-        do n = 1, n_max
-          do np = n, n_max
-            do l = 0, l_max
-              counter = counter+1
-              if( skip_soap_component_flattened(counter) )cycle
-              do m = 0, l
-                k = 1 + l*(l+1)/2 + m
-                counter2 = counter2 + 1
-!                multiplicity = 1.d0
-!               These ifs here are slow. I can probably get a 20% speedup in this part of the code (which is the current
-!               bottleneck) by optimizing this bit...
-!                if( n /= np )then
-!                  multiplicity = multiplicity * dsqrt(2.d0)
-!                end if
-!                if( m > 0 )then
-!                  multiplicity = multiplicity * 2.d0
-!                end if
-                multiplicity = multiplicity_array(counter2)
-                this_soap_rad_der(counter) = this_soap_rad_der(counter) + multiplicity * real( cnk_rad_der(k, n, k2) * &
-                                            conjg(cnk(k, np, i)) + cnk(k, n, i) * conjg(cnk_rad_der(k, np, k2)) )
-                this_soap_azi_der(counter) = this_soap_azi_der(counter) + multiplicity * real( cnk_azi_der(k, n, k2) * &
-                                            conjg(cnk(k, np, i)) + cnk(k, n, i) * conjg(cnk_azi_der(k, np, k2)) )
-                this_soap_pol_der(counter) = this_soap_pol_der(counter) + multiplicity * real( cnk_pol_der(k, n, k2) * &
-                                            conjg(cnk(k, np, i)) + cnk(k, n, i) * conjg(cnk_pol_der(k, np, k2)) )
-              end do
-            end do
-          end do
-        end do
-        if( compress_soap )then
-          do k = 1, compress_P_nonzero
-            soap_rad_der(compress_P_i(k), k2) = soap_rad_der(compress_P_i(k), k2) + compress_P_el(k) * &
-                                                this_soap_rad_der(compress_P_j(k))
-            soap_azi_der(compress_P_i(k), k2) = soap_azi_der(compress_P_i(k), k2) + compress_P_el(k) * &
-                                                this_soap_azi_der(compress_P_j(k))
-            soap_pol_der(compress_P_i(k), k2) = soap_pol_der(compress_P_i(k), k2) + compress_P_el(k) * &
-                                                this_soap_pol_der(compress_P_j(k))
-          end do
-        else
-          soap_rad_der(:,k2) = this_soap_rad_der(:)
-          soap_azi_der(:,k2) = this_soap_azi_der(:)
-          soap_pol_der(:,k2) = this_soap_pol_der(:)
-        end if
-!****************************
-! Uncomment for detailed timing check
-!
-!      end do
-!    end do
-! call cpu_time(time2)
-! write(*,*) time2-time1
-! call cpu_time(time1)
-!    k2 = 0
-!    do i = 1, n_sites
-!      do j = 1, n_neigh(i)
-!        k2 = k2 + 1
-!****************************
-        soap_rad_der(1:n_soap, k2) = soap_rad_der(1:n_soap, k2) / sqrt_dot_p(i) - &
-                                     soap(1:n_soap, i) / sqrt_dot_p(i)**3 * &
-                                     dot_product( soap(1:n_soap, i), soap_rad_der(1:n_soap, k2) )
-        soap_azi_der(1:n_soap, k2) = soap_azi_der(1:n_soap, k2) / sqrt_dot_p(i) - &
-                                     soap(1:n_soap, i) / sqrt_dot_p(i)**3 * &
-                                     dot_product( soap(1:n_soap, i), soap_azi_der(1:n_soap, k2) )
-        soap_pol_der(1:n_soap, k2) = soap_pol_der(1:n_soap, k2) / sqrt_dot_p(i) - &
-                                     soap(1:n_soap, i) / sqrt_dot_p(i)**3 * &
-                                     dot_product( soap(1:n_soap, i), soap_pol_der(1:n_soap, k2) )
-!       Transform to Cartesian
         if( j == 1 )then
           k3 = k2
-        else
-          soap_cart_der(1, 1:n_soap, k2) = dsin(thetas(k2)) * dcos(phis(k2)) * soap_rad_der(1:n_soap, k2) - &
-                                           dcos(thetas(k2)) * dcos(phis(k2)) / rjs(k2) * soap_pol_der(1:n_soap, k2) - &
-                                           dsin(phis(k2)) / rjs(k2) * soap_azi_der(1:n_soap, k2)
-          soap_cart_der(2, 1:n_soap, k2) = dsin(thetas(k2)) * dsin(phis(k2)) * soap_rad_der(1:n_soap, k2) - &
-                                           dcos(thetas(k2)) * dsin(phis(k2)) / rjs(k2) * soap_pol_der(1:n_soap, k2) + &
-                                           dcos(phis(k2)) / rjs(k2) * soap_azi_der(1:n_soap, k2)
-          soap_cart_der(3, 1:n_soap, k2) = dcos(thetas(k2)) * soap_rad_der(1:n_soap, k2) + &
-                                           dsin(thetas(k2)) / rjs(k2) * soap_pol_der(1:n_soap, k2)
-!         MAKE SURE THAT THIS IS CORRECT FOR THE CENTRAL ATOM DERIVATIVES
-          soap_cart_der(1, 1:n_soap, k3) = soap_cart_der(1, 1:n_soap, k3) - soap_cart_der(1, 1:n_soap, k2)
-          soap_cart_der(2, 1:n_soap, k3) = soap_cart_der(2, 1:n_soap, k3) - soap_cart_der(2, 1:n_soap, k2)
-          soap_cart_der(3, 1:n_soap, k3) = soap_cart_der(3, 1:n_soap, k3) - soap_cart_der(3, 1:n_soap, k2)
+          cycle
         end if
+
+        dot_r = 0.d0
+        dot_a = 0.d0
+        dot_o = 0.d0
+        do k = 1, n_soap
+          sv = soap(k, i)
+          dot_r = dot_r + sv*soap_rad_der(k, k2)
+          dot_a = dot_a + sv*soap_azi_der(k, k2)
+          dot_o = dot_o + sv*soap_pol_der(k, k2)
+        end do
+
+        sin_t = dsin(thetas(k2))
+        cos_t = dcos(thetas(k2))
+        sin_f = dsin(phis(k2))
+        cos_f = dcos(phis(k2))
+        inv_r = 1.d0 / rjs(k2)
+        cx =  sin_t*cos_f
+        cy =  sin_t*sin_f
+        cz =  cos_t
+        px = -cos_t*cos_f*inv_r
+        py = -cos_t*sin_f*inv_r
+        pz =  sin_t*inv_r
+        ax = -sin_f*inv_r
+        ay =  cos_f*inv_r
+
+!       MAKE SURE THAT THIS IS CORRECT FOR THE CENTRAL ATOM DERIVATIVES
+        do k = 1, n_soap
+          sv = soap(k, i)
+          vr = soap_rad_der(k, k2)*inv_p - sv*inv_p3*dot_r
+          va = soap_azi_der(k, k2)*inv_p - sv*inv_p3*dot_a
+          vo = soap_pol_der(k, k2)*inv_p - sv*inv_p3*dot_o
+          soap_cart_der(1, k, k2) = cx*vr + px*vo + ax*va
+          soap_cart_der(2, k, k2) = cy*vr + py*vo + ay*va
+          soap_cart_der(3, k, k2) = cz*vr + pz*vo
+        end do
+        do k = 1, n_soap
+          soap_cart_der(1, k, k3) = soap_cart_der(1, k, k3) - soap_cart_der(1, k, k2)
+          soap_cart_der(2, k, k3) = soap_cart_der(2, k, k3) - soap_cart_der(2, k, k2)
+          soap_cart_der(3, k, k3) = soap_cart_der(3, k, k3) - soap_cart_der(3, k, k2)
+        end do
       end do
     end do
-    deallocate( this_soap_rad_der, this_soap_azi_der, this_soap_pol_der )
 !****************************
 ! Uncomment for detailed timing check
 !
@@ -743,15 +788,14 @@ module soap_turbo_desc
 !  write(*,"(f8.3, 1X, A)") time2-time1, "seconds"
 
 
-  deallocate( eimphi, preflm, plm_array, prefl, prefm, fact_array, radial_exp_coeff, angular_exp_coeff, cnk, &
+! The arrays sized by n_atom_pairs live in the persistent buffers above and are
+! deliberately not freed here; the pointers into them are re-associated on the
+! next call.
+  deallocate( eimphi, preflm, plm_array, prefl, prefm, fact_array, &
               i_beg, i_end, do_central, sqrt_dot_p )
   deallocate( skip_soap_component_flattened )
   if( do_derivatives )then
-    deallocate( radial_exp_coeff_der, angular_exp_coeff_rad_der, soap_rad_der, soap_azi_der, soap_pol_der, &
-                cnk_rad_der, cnk_azi_der, cnk_pol_der, eimphi_rad_der, angular_exp_coeff_azi_der, &
-                prefl_rad_der, angular_exp_coeff_pol_der )
-  else
-    deallocate( radial_exp_coeff_der )
+    deallocate( eimphi_rad_der, prefl_rad_der )
   end if
 
   if( do_timing )then
@@ -776,62 +820,190 @@ module soap_turbo_desc
   end if
 
   end subroutine get_soap
-!**************************************************************************
-
-
-
-
-
-
-
-
-
 
 
 !**************************************************************************
-  subroutine get_derivatives(radial_exp_coeff, angular_exp_coeff, radial_exp_coeff_der, &
-                             angular_exp_coeff_rad_der, angular_exp_coeff_azi_der, angular_exp_coeff_pol_der, &
-                             n_sites, n_max, l_max, n_neigh, rjs, cutoff, cnk_rad_der, cnk_azi_der, cnk_pol_der )
+!
+! Spherical derivatives of the (uncompressed, unnormalised) SOAP vector,
+! straight from the radial and angular expansions.
+!
+! The old route went through cnk_rad_der / cnk_azi_der / cnk_pol_der, three
+! (k_max, n_max, n_atom_pairs) complex arrays. For l_max = 8 and n_max = 16
+! that is 46 kB per neighbour pair to write and then read back, a few hundred
+! MB per batch, and it is the reason "Memory allocation" and "SOAP vector
+! build" between them were 80% of get_soap.
+!
+! They are not needed, because cnk_alpha_der factorises. With
+!   A(k)   = angular_exp_coeff(k,k2),      A_r(k) = angular_exp_coeff_rad_der(k,k2)
+!   r(n)   = radial_exp_coeff(n,k2),       r'(n) = radial_exp_coeff_der(n,k2)
+! the old array was
+!   cnk_rad_der(k,n,k2) = 4pi [ r'(n) A(k) + r(n) A_r(k) ]
+! which is separable in n and k, and the SOAP derivative contracts it against
+! cnk over k. Writing the multiplicity as base(n,np)*w(m), with
+! base = sqrt(2) for n /= np and w = 2 for m > 0, and using
+! Re(z conjg(w)) = Re(w conjg(z)), the contraction collapses to
+!
+!   P (n,l) = sum_m w(m) Re( A(k)     conjg(cnk(k,n,i)) )
+!   Q (n,l) = sum_m w(m) Re( A_r(k)   conjg(cnk(k,n,i)) )
+!   Qa(n,l) = sum_m w(m) Re( A_azi(k) conjg(cnk(k,n,i)) )
+!   Qp(n,l) = sum_m w(m) Re( A_pol(k) conjg(cnk(k,n,i)) )
+!
+!   d_rad(n,np,l) = 4pi base [ r'(n) P(np,l) + r(n) Q(np,l)
+!                            + r'(np) P(n,l) + r(np) Q(n,l) ]
+!   d_azi(n,np,l) = 4pi base [ r(n) Qa(np,l) + r(np) Qa(n,l) ]
+!   d_pol(n,np,l) = 4pi base [ r(n) Qp(np,l) + r(np) Qp(n,l) ]
+!
+! so the per-pair traffic drops from 46 kB to about 3 kB, and the n_max*(n_max+1)/2
+! contractions over k become n_max of them.
+!
+! Pairs beyond the cutoff need no special case: the angular routine leaves
+! their A columns zero, so every P and Q comes out zero, exactly as the
+! explicit cnk_*_der = 0 did.
+!
+  subroutine soap_derivatives_from_expansion(n_sites, n_neigh, n_max, l_max, n_soap, &
+                                             n_soap_uncompressed, cnk, angular_exp_coeff, &
+                                             angular_exp_coeff_rad_der, angular_exp_coeff_azi_der, &
+                                             angular_exp_coeff_pol_der, radial_exp_coeff, &
+                                             radial_exp_coeff_der, skip, compress_soap, &
+                                             compress_P_nonzero, compress_P_i, compress_P_j, &
+                                             compress_P_el, soap_rad_der, soap_azi_der, soap_pol_der)
 
     implicit none
 
-    real(dp), intent(in) :: radial_exp_coeff(:,:), radial_exp_coeff_der(:,:), rjs(:), cutoff
-    complex(dp), intent(in) :: angular_exp_coeff(:,:)
-    complex(dp) :: angular_exp_coeff_rad_der(:,:), angular_exp_coeff_azi_der(:,:), angular_exp_coeff_pol_der(:,:)
-    complex(dp), intent(out) :: cnk_rad_der(:,:,:), cnk_azi_der(:,:,:), cnk_pol_der(:,:,:)
-    integer, intent(in) :: n_sites, n_max, l_max, n_neigh(:)
-    integer :: k2, i, j, n, m, k, l
-    real(dp) :: pi
+    integer, intent(in) :: n_sites, n_neigh(:), n_max, l_max, n_soap, n_soap_uncompressed
+    integer, intent(in) :: compress_P_nonzero, compress_P_i(:), compress_P_j(:)
+    complex(dp), intent(in), contiguous :: cnk(:,:,:), angular_exp_coeff(:,:)
+    complex(dp), intent(in), contiguous :: angular_exp_coeff_rad_der(:,:), angular_exp_coeff_azi_der(:,:)
+    complex(dp), intent(in), contiguous :: angular_exp_coeff_pol_der(:,:)
+    real(dp), intent(in), contiguous :: radial_exp_coeff(:,:), radial_exp_coeff_der(:,:)
+    real(dp), intent(in) :: compress_P_el(:)
+    logical, intent(in) :: skip(:), compress_soap
+    real(dp), intent(inout), contiguous :: soap_rad_der(:,:), soap_azi_der(:,:), soap_pol_der(:,:)
+
+    integer :: i, j, k, k2, kb, l, m, n, np, counter, k_max
+    real(dp) :: pi, fourpi, base, sq2, w
+    real(dp) :: cr, ci, acc_p, acc_q, acc_a, acc_o
+    real(dp) :: rn, rdn, rnp, rdnp, pre
+
+    real(dp) :: P(n_max, 0:l_max), Q(n_max, 0:l_max), Qa(n_max, 0:l_max), Qo(n_max, 0:l_max)
+    real(dp), allocatable :: this_rad(:), this_azi(:), this_pol(:)
 
     pi = dacos(-1.d0)
+    fourpi = 4.d0*pi
+    sq2 = dsqrt(2.d0)
+    k_max = 1 + l_max*(l_max+1)/2 + l_max
 
+    allocate( this_rad(1:n_soap_uncompressed) )
+    allocate( this_azi(1:n_soap_uncompressed) )
+    allocate( this_pol(1:n_soap_uncompressed) )
+!   Skipped components are never assigned below and never read; clear them once.
+    do counter = 1, n_soap_uncompressed
+      if( skip(counter) )then
+        this_rad(counter) = 0.d0
+        this_azi(counter) = 0.d0
+        this_pol(counter) = 0.d0
+      end if
+    end do
 
     k2 = 0
     do i = 1, n_sites
-!     We could skip j = 1, which is the central atom
       do j = 1, n_neigh(i)
         k2 = k2 + 1
-        if( rjs(k2) < cutoff )then
-          do n = 1, n_max
+!       j = 1 is the central atom. Its Cartesian column is built purely by
+!       accumulation from its neighbours, so its spherical derivative is never
+!       read and is not computed here.
+        if( j == 1 ) cycle
+
+!       ---- the four contractions over k, one per (n,l)
+        do n = 1, n_max
+          do l = 0, l_max
+            kb = 1 + l*(l+1)/2
+            acc_p = 0.d0
+            acc_q = 0.d0
+            acc_a = 0.d0
+            acc_o = 0.d0
+            do m = 0, l
+              k = kb + m
+              w = 2.d0
+              if( m == 0 ) w = 1.d0
+              cr = dble(cnk(k,n,i))
+              ci = aimag(cnk(k,n,i))
+              acc_p = acc_p + w*( dble(angular_exp_coeff(k,k2))*cr + aimag(angular_exp_coeff(k,k2))*ci )
+              acc_q = acc_q + w*( dble(angular_exp_coeff_rad_der(k,k2))*cr &
+                                + aimag(angular_exp_coeff_rad_der(k,k2))*ci )
+              acc_a = acc_a + w*( dble(angular_exp_coeff_azi_der(k,k2))*cr &
+                                + aimag(angular_exp_coeff_azi_der(k,k2))*ci )
+              acc_o = acc_o + w*( dble(angular_exp_coeff_pol_der(k,k2))*cr &
+                                + aimag(angular_exp_coeff_pol_der(k,k2))*ci )
+            end do
+            P (n,l) = acc_p
+            Q (n,l) = acc_q
+            Qa(n,l) = acc_a
+            Qo(n,l) = acc_o
+          end do
+        end do
+
+!       ---- assemble the components that survive compression
+        counter = 0
+        do n = 1, n_max
+          rn  = radial_exp_coeff(n,k2)
+          rdn = radial_exp_coeff_der(n,k2)
+          do np = n, n_max
+            rnp  = radial_exp_coeff(np,k2)
+            rdnp = radial_exp_coeff_der(np,k2)
+            base = sq2
+            if( n == np ) base = 1.d0
+            pre = fourpi*base
             do l = 0, l_max
-              do m = 0, l
-                k = 1 + l*(l+1)/2 + m
-!               Radial derivatives:
-                cnk_rad_der(k, n, k2) = 4.d0*pi * ( angular_exp_coeff(k, k2) * radial_exp_coeff_der(n, k2) + &
-                                         angular_exp_coeff_rad_der(k, k2) * radial_exp_coeff(n, k2) )
-!               Azimuthal angle derivatives:
-                cnk_azi_der(k, n, k2) = 4.d0*pi * angular_exp_coeff_azi_der(k, k2) * radial_exp_coeff(n, k2)
-!               Polar angle derivatives:
-                cnk_pol_der(k, n, k2) = 4.d0*pi * angular_exp_coeff_pol_der(k, k2) * radial_exp_coeff(n, k2)
-              end do
+              counter = counter + 1
+              if( skip(counter) )cycle
+              this_rad(counter) = pre*( rdn*P(np,l) + rn*Q(np,l) + rdnp*P(n,l) + rnp*Q(n,l) )
+              this_azi(counter) = pre*( rn*Qa(np,l) + rnp*Qa(n,l) )
+              this_pol(counter) = pre*( rn*Qo(np,l) + rnp*Qo(n,l) )
             end do
           end do
+        end do
+
+        if( compress_soap )then
+          do k = 1, n_soap
+            soap_rad_der(k, k2) = 0.d0
+            soap_azi_der(k, k2) = 0.d0
+            soap_pol_der(k, k2) = 0.d0
+          end do
+          do k = 1, compress_P_nonzero
+            soap_rad_der(compress_P_i(k), k2) = soap_rad_der(compress_P_i(k), k2) + compress_P_el(k) * &
+                                                this_rad(compress_P_j(k))
+            soap_azi_der(compress_P_i(k), k2) = soap_azi_der(compress_P_i(k), k2) + compress_P_el(k) * &
+                                                this_azi(compress_P_j(k))
+            soap_pol_der(compress_P_i(k), k2) = soap_pol_der(compress_P_i(k), k2) + compress_P_el(k) * &
+                                                this_pol(compress_P_j(k))
+          end do
+        else
+          soap_rad_der(1:n_soap, k2) = this_rad(1:n_soap)
+          soap_azi_der(1:n_soap, k2) = this_azi(1:n_soap)
+          soap_pol_der(1:n_soap, k2) = this_pol(1:n_soap)
         end if
       end do
     end do
 
-    return
-  end subroutine
+    deallocate( this_rad, this_azi, this_pol )
+
+  return
+  end subroutine soap_derivatives_from_expansion
+!**************************************************************************
+
+!**************************************************************************
+
+
+
+
+
+
+
+
+
+
+
 !**************************************************************************
 
 
