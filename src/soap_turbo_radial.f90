@@ -41,6 +41,34 @@ module soap_turbo_radial
   private :: real32, real64, int32, int64
 
 
+! ---------------------------------------------------------------------------
+! Filter seed: which of the two filter recursions the radial expansion uses.
+!
+! The Gaussian filter integral over [rcut_soft, rcut_hard] is built by a
+! recursion in alpha that is seeded at alpha = -2. Every step of it drops the
+! surface term at r = rcut_hard, on the grounds that (1 - r/rcut_hard)**(alpha+2)
+! vanishes there -- true for alpha >= -1, but not for the alpha = -2 seed,
+! where the exponent is 0 and the factor is 1.
+!
+! Keeping that term makes exp_coeff_der agree with a central difference of
+! exp_coeff to machine precision (verified in real128). Dropping it leaves a
+! relative disagreement of order exp(-nf**2/2) -- 3.4e-4 for the default
+! nf = 4 -- concentrated on neighbours sitting at the hard cutoff, which for
+! alpha_max = 8 shows up as a ~5e-6 relative error in both the coefficients
+! and their derivatives.
+!
+!   .true.   bit-compatible with the pre-2026 code (default)
+!   .false.  finite-difference consistent
+!
+! Flipping this changes descriptor values at the 1e-5 level near rcut_hard, so
+! it changes energies and forces from a fitted GAP by a comparable relative
+! amount. Refit or re-baseline before turning it off in production.
+! ---------------------------------------------------------------------------
+  logical, public :: legacy_filter_seed = .true.
+
+
+
+
   contains
 
 !**************************************************************************
@@ -79,11 +107,15 @@ module soap_turbo_radial
 ! polynomial basis set and the saparable Gaussian representation for the
 ! atomic sites.
 !
+! It is a thin wrapper around radial_expansion_kernel(), which is shared
+! with the poly3gauss basis; see the comments there.
+!
   subroutine get_radial_expansion_coefficients_poly3(n_sites, n_neigh, rjs_in, alpha_max, rcut_soft_in, &
                                                      rcut_hard_in, atom_sigma_in, atom_sigma_scaling, &
                                                      amplitude_scaling, nf, W, scaling_mode, mask, &
                                                      radial_enhancement, do_derivatives, do_central, &
-                                                     central_weight, exp_coeff, exp_coeff_der)
+                                                     central_weight, exp_coeff, exp_coeff_der, &
+                                                     exp_coeff_der2)
 !   Expansion coefficients using the polynomial basis with smooth filter
 
     implicit none
@@ -91,20 +123,17 @@ module soap_turbo_radial
     integer, intent(in) :: alpha_max, n_neigh(:), n_sites, radial_enhancement
     real(dp), intent(in) :: rcut_soft_in, rcut_hard_in, rjs_in(:), atom_sigma_in, nf, atom_sigma_scaling
     real(dp), intent(in) :: amplitude_scaling, central_weight
-    real(dp) :: rcut_soft, rcut_hard, atom_sigma, atom_sigma_scaled, amplitude
     logical, intent(in) :: mask(:), do_derivatives, do_central
     character(*), intent(in) :: scaling_mode
-!
-    integer :: n, i, j, k, alpha_max_der
-    real(dp) :: I_n, I_np1, I_np2, pi, sq2, rj, N_n, N_np1, N_np2, C1, C2, dr, s2, sf2
     real(dp) :: W(:,:)
-    real(dp) :: atom_sigma_f, rj_f
 !   Results will be stored in exp_coeff, which is an array of dimension
 !   (alpha_max, n_atom_pairs)
     real(dp) :: exp_coeff(:,:), exp_coeff_der(:,:)
-    real(dp), allocatable :: exp_coeff_temp1(:), exp_coeff_temp2(:), exp_coeff_der_temp(:)
-    logical, save :: print_basis = .false., print_message = .false.
-    real(dp) :: denom, der_sjf_rj, der_rjf_rj, amplitude_der, pref_f, der_pref_f
+!   Optional second derivative d^2 exp_coeff / d rj^2, same shape. Requesting it
+!   requires do_derivatives and legacy_filter_seed = .false.; see the kernel.
+    real(dp), optional :: exp_coeff_der2(:,:)
+
+    logical, save :: print_message = .true.
 
 !   For this basis numerical instabilities in the orthonormal basis construction develop
 !   above alpha_max = 7. These are relatively small up to alpha_max = 10 and become
@@ -131,272 +160,15 @@ module soap_turbo_radial
       write(*,*) "-------------------------------------------------------------------------------"
     end if
 
-!   If the user requests derivatives, we need to get the expansion coefficients up to
-!   alpha_max + 2
-    if( do_derivatives )then
-      alpha_max_der = alpha_max + 2
-    else
-      alpha_max_der = alpha_max
-    end if
-    allocate( exp_coeff_temp1(1:alpha_max_der) )
-    allocate( exp_coeff_temp2(1:alpha_max_der) )
-    allocate( exp_coeff_der_temp(1:alpha_max) )
-
-
-!   This is for debugging. It prints the basis set to plot it with Gnuplot (gfortran only)
-    if( print_basis )then
-      print_basis = .false.
-      write(*,*) "p(x,n,rcut) = (1.-x/rcut)**(n+2) / sqrt( rcut / (2.*n+5.) ) "
-      do j=1, alpha_max
-        write(*,"(A,I0,A)",advance="no") "p", j, "(x) = "
-        do i = 1, alpha_max
-          write(*,"(A,I2,A,F16.10,A,E16.8,A)",advance="no") "p(x,", i, ",", rcut_hard_in, ") *", W(j,i), "+"
-        end do
-        write(*,*) "0."
-      end do
-    end if
-
-    pi = dacos(-1.d0)
-    sq2 = dsqrt(2.d0)
-    exp_coeff = 0.d0
-    if( do_derivatives )then
-      exp_coeff_der = 0.d0
-    end if
-!
-!   **************** New basis ******************
-!   Redefine all the distances by dividing them by rcut_hard
-!   We do this to avoid numerical instability when the value
-!   of alpha is too high
-!
-!    rcut_soft = rcut_soft_in
-!    rcut_hard = rcut_hard_in
-!    atom_sigma = atom_sigma_in
-!    dr = rcut_hard - rcut_soft
-    rcut_soft = rcut_soft_in/rcut_hard_in
-    rcut_hard = 1.d0
-    atom_sigma = atom_sigma_in/rcut_hard_in
-    dr = 1.d0 - rcut_soft_in/rcut_hard_in
-!   *********************************************
-!
-
-
-    k = 0
-    do i = 1, n_sites
-      do j = 1, n_neigh(i)
-        k = k + 1
-!       Check if we need to do the central atom
-        if( j == 1 .and. .not. do_central )then
-          cycle
-        end if
-        if( rjs_in(k) < rcut_hard_in .and. mask(k) )then
-          pref_f = 0.d0
-          exp_coeff_temp1 = 0.d0
-          exp_coeff_temp2 = 0.d0
-          exp_coeff_der_temp = 0.d0
-!   **************** New basis ******************
-!          rj = rjs_in(k)
-          rj = rjs_in(k)/rcut_hard_in
-!   *********************************************
-!         We leave this here because in the future atom_sigma will be rj dependent
-          atom_sigma_scaled = atom_sigma + atom_sigma_scaling*rj
-          s2 = atom_sigma_scaled**2
-          if( scaling_mode == "polynomial" )then
-!           WARNING: the 1/atom_sigma_angular^2 term is missing from these amplitudes and needs to
-!           be taken into account in the corresponding part of the code.
-!       
-!           WARNING2: These expressions here already assume rcut_hard = 1., so this parameter is missing
-!           from the expressions
-            if( amplitude_scaling == 0.d0 )then
-              amplitude = 1.d0 / atom_sigma_scaled
-              amplitude_der = - atom_sigma_scaling / s2 
-            else if( 1.d0 + 2.d0*rj**3 - 3.d0*rj**2 <= 1.d-10 )then
-              amplitude = 0.d0
-              amplitude_der = 0.d0
-            else
-              if( amplitude_scaling == 1.d0 )then
-                amplitude = 1.d0 / atom_sigma_scaled * ( 1.d0 + 2.d0*rj**3 - 3.d0*rj**2 )
-                amplitude_der = 6.d0 / atom_sigma_scaled * (rj**2 - rj) &
-                                - atom_sigma_scaling / atom_sigma_scaled * amplitude
-              else
-                amplitude = 1.d0 / atom_sigma_scaled * ( 1.d0 + 2.d0*rj**3 - 3.d0*rj**2 )**amplitude_scaling
-                amplitude_der = 6.d0*amplitude_scaling / atom_sigma_scaled * (rj**2 - rj) &
-                                * ( 1.d0 + 2.d0*rj**3 - 3.d0*rj**2 )**(amplitude_scaling - 1.d0) &
-                                - atom_sigma_scaling / atom_sigma_scaled * amplitude
-              end if
-            end if
-          end if
-!         The central atom needs to be scaled by central_weight
-          if( j == 1 )then
-            amplitude = central_weight * amplitude
-            amplitude_der = central_weight * amplitude_der
-          end if
-!         The radial enhancement adds a scaling corresponding to the integral of a Gaussian at the position
-!         of atom j.
-          if( radial_enhancement == 1 )then
-            amplitude_der = amplitude * ( 1.d0 + dsqrt(2.d0/pi)*atom_sigma_scaling ) + &
-                            amplitude_der * ( rj + dsqrt(2.d0/pi)*atom_sigma_scaled )
-            amplitude = amplitude * ( rj + dsqrt(2.d0/pi)*atom_sigma_scaled )
-          else if( radial_enhancement == 2 )then
-            amplitude_der = amplitude*( 2.d0*rj + 2.d0*atom_sigma_scaled*atom_sigma_scaling + &
-                                        dsqrt(8.d0/pi)*atom_sigma_scaled + dsqrt(8.d0/pi)*rj*atom_sigma_scaling ) + &
-                            amplitude_der*( rj**2 + s2 + dsqrt(8.d0/pi)*atom_sigma_scaled*rj )
-            amplitude = amplitude * ( rj**2 + s2 + dsqrt(8.d0/pi)*atom_sigma_scaled*rj )
-          end if       
-!         We have the recursion series starting at n = 0, which means alpha = -2
-!         However, we only need to save the expansion coefficients for alpha >= 1
-!         This is I_-1
-          I_n = 0.d0
-          N_n = 1.d0
-!         This is I_0
-          N_np1 = N_a(rcut_hard, -2)
-          I_np1 = dsqrt(pi/2.d0) * atom_sigma_scaled * ( derf( (rcut_soft-rj)/sq2/atom_sigma_scaled ) - &
-                                                  derf( (-rj)/sq2/atom_sigma_scaled ) ) / N_np1
-!         Speed up the computation of these coefficients
-          if( rcut_hard_in == rcut_soft_in )then
-            C1 = 0.d0
-          else
-            C1 = s2 / dr * dexp(-0.5d0 * (rcut_soft - rj)**2 / s2)
-          end if
-          C2 = s2 / rcut_hard * dexp(-0.5d0 * rj**2 / s2)
-          do n = -1, alpha_max_der
-            C1 = C1 * dr
-            C2 = C2 * rcut_hard
-            N_np2 = N_a(rcut_hard, n)
-!           This is I_alpha
-            I_np2 = s2 * dfloat(n+1) * N_n/ N_np2 * I_n &
-                    - N_np1 * (rj - rcut_hard) / N_np2 * I_np1 &
-                    + C1 / N_np2 &
-                    - C2 / N_np2
-            if(n > 0)then
-              exp_coeff_temp1(n) = I_np2
-            end if
-            N_n = N_np1
-            N_np1 = N_np2
-            I_n = I_np1
-            I_np1 = I_np2
-          end do
-!         Compute the contribution to the derivative for this part (excludes the amplitude)
-          if( do_derivatives )then
-            do n = 1, alpha_max
-              exp_coeff_der_temp(n) = (rj - rcut_hard)/s2 * ( atom_sigma_scaling * (rj - rcut_hard) / atom_sigma_scaled &
-                                  - 1.d0 ) * exp_coeff_temp1(n) + &
-                                 rcut_hard*N_a(rcut_hard, n+1)/s2/N_a(rcut_hard, n) * ( 2.d0 * atom_sigma_scaling &
-                                  * (rj - rcut_hard) / atom_sigma_scaled - 1.d0 ) * exp_coeff_temp1(n+1) + &
-                                 atom_sigma_scaling*rcut_hard**2*N_a(rcut_hard, n+2)/atom_sigma_scaled**3/ &
-                                  N_a(rcut_hard, n) * exp_coeff_temp1(n+2)
-            end do
-          end if
-!         If the atom is less than 4 standard deviations away from the soft cutoff, we add
-!         also this correction to the integrals. This corresponds to a Gaussian filter. We
-!         integrate between rcut_soft and rcut_hard in this case
-!
-!         This explicit ".true." or ".false." logical statement is there for debugging. For
-!         regular code use it can be set to .false.
-          if( .false. .or. (rcut_soft - rj) < 4.d0*atom_sigma_scaled )then
-            atom_sigma_f = atom_sigma_scaled * dr / nf / dsqrt(s2 + dr**2/nf**2)
-            rj_f = (s2 * rcut_soft + dr**2/nf**2*rj) / (s2 + dr**2/nf**2)
-!           We leave this here because in the future atom_sigma will be rj dependent
-            sf2 = atom_sigma_f**2
-!           The products of two Gaussians is a Gaussian, but we need to add a prefactor
-            pref_f = dexp( -0.5d0 * (rcut_soft-rj)**2 / ( s2 + dr**2/nf**2 ) )
-!           We have the recursion series starting at n = 0, which means alpha = -2
-!           However, we only need to save the expansion coefficients for alpha >= 1
-!           This is I_-1
-            I_n = 0.d0
-            N_n = 1.d0
-!           This is I_0
-            N_np1 = N_a(rcut_hard, -2)
-            I_np1 = dsqrt(pi/2.d0) * atom_sigma_f * ( derf( (rcut_hard-rj_f)/sq2/atom_sigma_f ) - &
-                                                      derf( (rcut_soft-rj_f)/sq2/atom_sigma_f ) ) / N_np1
-!           Speed up the computation of these coefficients
-            C2 = sf2 / dr * dexp(-0.5d0 * (rcut_soft - rj_f)**2 / sf2)
-            do n = -1, alpha_max_der
-              C2 = C2 * dr
-              N_np2 = N_a(rcut_hard, n)
-!             This is I_alpha
-              I_np2 = sf2 * dfloat(n+1) * N_n/ N_np2 * I_n &
-                      - N_np1 * (rj_f - rcut_hard) / N_np2 * I_np1 &
-                      - C2 / N_np2
-              if(n > 0)then
-                exp_coeff_temp2(n) = I_np2
-              end if
-              N_n = N_np1
-              N_np1 = N_np2
-              I_n = I_np1
-              I_np1 = I_np2
-            end do
-!           Compute the contribution to the derivative for this part (excludes the amplitude)
-            if( do_derivatives )then
-              denom = s2 + dr**2/nf**2
-              der_pref_f = pref_f * ( (rcut_soft - rj) / denom + (rcut_soft - rj)**2 / denom**2 * &
-                                      atom_sigma_scaled * atom_sigma_scaling )
-              der_rjf_rj = (2.d0*atom_sigma_scaled*rcut_soft*atom_sigma_scaling + dr**2/nf**2) / denom &
-                           - (s2*rcut_soft + dr**2/nf**2 * rj) * 2.d0 * atom_sigma_scaled * &
-                             atom_sigma_scaling / denom**2
-              der_sjf_rj = atom_sigma_scaling * dr/nf / dsqrt(denom) * (1.d0 - atom_sigma_scaled**2/denom)
-              do n = 1, alpha_max
-                exp_coeff_der_temp(n) = exp_coeff_der_temp(n) + &
-                                      pref_f * ( &
-                                      (rj_f - rcut_hard)/sf2 * ( der_sjf_rj * (rj_f - rcut_hard) / atom_sigma_f &
-                                        - der_rjf_rj ) * exp_coeff_temp2(n) + &
-                                      rcut_hard*N_a(rcut_hard, n+1)/sf2/N_a(rcut_hard, n) * ( 2.d0 * der_sjf_rj &
-                                        * (rj_f - rcut_hard) / atom_sigma_f - der_rjf_rj ) * exp_coeff_temp2(n+1) + &
-                                      der_sjf_rj*rcut_hard**2*N_a(rcut_hard, n+2)/atom_sigma_f**3/ &
-                                      N_a(rcut_hard, n) * exp_coeff_temp2(n+2) ) + &
-                                      der_pref_f * &
-                                      exp_coeff_temp2(n)
-              end do
-            end if
-          end if
-!         Transform from g_alpha to g_n (the orthonormal basis)
-          if( do_derivatives )then
-            exp_coeff_der_temp(1:alpha_max) = amplitude * exp_coeff_der_temp(1:alpha_max) + amplitude_der * &
-                                              (exp_coeff_temp1(1:alpha_max) + pref_f * exp_coeff_temp2(1:alpha_max))
-            exp_coeff_der(1:alpha_max, k) = matmul( W, exp_coeff_der_temp(1:alpha_max) )
-          end if
-          exp_coeff(1:alpha_max, k) = amplitude * matmul( W, exp_coeff_temp1(1:alpha_max) + pref_f * exp_coeff_temp2(1:alpha_max) )
-        end if
-      end do
-    end do
-
-
-
-
-!   **************** New basis ******************
-!   This results from the change of variable in the
-!   overlap integrals. We only need this if we want to
-!   know the actual value of the expansion coefficients.
-!   Since this is a global factor, once we have normalized
-!   the SOAP vectors it does not have an effect anymore.
-    exp_coeff = exp_coeff * dsqrt(rcut_hard_in)
-    if( do_derivatives )then
-      exp_coeff_der = exp_coeff_der / dsqrt(rcut_hard_in)
-    end if
-!   *********************************************
-
-!   This is for debugging
-    if( .false. )then
-      open(10, file="radial_expansion_coefficients.dat", status="unknown", access="append")
-      write(10,*) exp_coeff(1:alpha_max, 2)
-      close(10)
-      if( do_derivatives )then
-        open(10, file="radial_expansion_derivatives.dat", status="unknown", access="append")
-        write(10,*) exp_coeff_der(1:alpha_max, 2)
-        close(10)
-      end if
-     end if
-
-    deallocate( exp_coeff_temp1, exp_coeff_temp2, exp_coeff_der_temp )
+    call radial_expansion_kernel(n_sites, n_neigh, rjs_in, alpha_max, rcut_soft_in, rcut_hard_in, &
+                                 atom_sigma_in, atom_sigma_scaling, amplitude_scaling, nf, W, &
+                                 scaling_mode, mask, radial_enhancement, do_derivatives, &
+                                 do_central, central_weight, .false., exp_coeff, exp_coeff_der, &
+                                 exp_coeff_der2)
 
   return
   end subroutine
 !**************************************************************************
-
-
-
-
-
-
 
 
 
@@ -411,31 +183,23 @@ module soap_turbo_radial
                                                           rcut_hard_in, atom_sigma_in, atom_sigma_scaling, &
                                                           amplitude_scaling, nf, W, scaling_mode, mask, &
                                                           radial_enhancement, do_derivatives, exp_coeff, &
-                                                          exp_coeff_der)
+                                                          exp_coeff_der, exp_coeff_der2)
 !   Expansion coefficients using the polynomial basis with smooth filter plus a Gaussian centered at the origin
-!
-!   TRY OUT: Check for very small numbers (that could lead to negative numbers) and then truncate them
-!   to zero
-!
+
     implicit none
 
     integer, intent(in) :: alpha_max, n_neigh(:), n_sites, radial_enhancement
     real(dp), intent(in) :: rcut_soft_in, rcut_hard_in, rjs_in(:), atom_sigma_in, nf, atom_sigma_scaling
     real(dp), intent(in) :: amplitude_scaling
-    real(dp) :: rcut_soft, rcut_hard, atom_sigma, atom_sigma_scaled, amplitude
     logical, intent(in) :: mask(:), do_derivatives
     character(*), intent(in) :: scaling_mode
-!
-    integer :: n, i, j, k, alpha_max_der
-    real(dp) :: I_n, I_np1, I_np2, pi, sq2, rj, N_n, N_np1, N_np2, C1, C2, dr, s2, sf2
     real(dp) :: W(:,:)
-    real(dp) :: atom_sigma_f, rj_f, N_gauss
-!   Results will be stored in exp_coeff, which is an array of dimension
-!   (n_sites, n_neigh_max, alpha_max)
     real(dp) :: exp_coeff(:,:), exp_coeff_der(:,:)
-    real(dp), allocatable :: exp_coeff_temp1(:), exp_coeff_temp2(:), exp_coeff_der_temp(:)
-    logical, save :: print_basis = .false., print_message = .false.
-    real(dp) :: denom, der_sjf_rj, der_rjf_rj, amplitude_der, pref_f, der_pref_f, sigma_star
+!   Optional second derivative d^2 exp_coeff / d rj^2, same shape. Requesting it
+!   requires do_derivatives and legacy_filter_seed = .false.; see the kernel.
+    real(dp), optional :: exp_coeff_der2(:,:)
+
+    logical, save :: print_message = .true.
 
 !   For this basis numerical instabilities in the orthonormal basis construction develop
 !   above alpha_max = 8. These are relatively small up to alpha_max = 11 and become
@@ -451,6 +215,7 @@ module soap_turbo_radial
       write(*,*) "-------------------------------------------------------------------------------"
       stop
     else if( alpha_max > 8 .and. print_message )then
+      print_message = .false.
       write(*,*) "-------------------------------------------------------------------------------"
       write(*,*) "WARNING: Due to numerical instabilities in the basis construction for the       <---- WARNING"
       write(*,*) "poly3gauss basis, it is strongly recommended not to exceed alpha_max = 8. For"
@@ -461,289 +226,700 @@ module soap_turbo_radial
       write(*,*) "-------------------------------------------------------------------------------"
     end if
 
-!   If the user requests derivatives, we need to get the expansion coefficients up to
-!   alpha_max - 1 + 2. The "-1" is there because the Gaussian basis at the origin does not
-!   participate in the calculation of the derivatives for the polynomial basis functions
-    if( do_derivatives )then
-      alpha_max_der = alpha_max + 2
-    else
-      alpha_max_der = alpha_max
-    end if
-    allocate( exp_coeff_temp1(1:alpha_max_der) )
-    allocate( exp_coeff_temp2(1:alpha_max_der) )
-    allocate( exp_coeff_der_temp(1:alpha_max) )
-
-!   This is for debugging. It prints the basis set to plot it with Gnuplot (gfortran only)
-!    if( .false. .and. print_basis )then
-    if( print_basis )then
-      print_basis = .false.
-      write(*,*) "p(x,n,rcut) = (1.-x/rcut)**(n+2) / sqrt( rcut / (2.*n+5.) ) "
-      write(*,*) "g(x,s) = exp(-0.5*x**2/s**2) * sqrt(2./s) / pi**0.25 "
-      do j = 1, alpha_max
-        write(*,"(A,I0,A)",advance="no") "p", j, "(x) = "
-        do i = 1, alpha_max-1
-          write(*,"(A,I2,A,F16.10,A,E16.8,A)",advance="no") "p(x,", i, ",", rcut_hard_in, ") *", W(j,i), "+"
-        end do
-        write(*,"(A,F16.10,A,E16.8,A)",advance="no") "g(x,", atom_sigma_in, ") *", W(j,alpha_max), "+"
-        write(*,*) "0."
-      end do
-    end if
-
-    pi = dacos(-1.d0)
-    sq2 = dsqrt(2.d0)
-    exp_coeff = 0.d0
-    if( do_derivatives )then
-      exp_coeff_der = 0.d0
-    end if
-!
-!   **************** New basis ******************
-!   Redefine all the distances by dividing them by rcut_hard
-!   We do this to avoid numerical instability when the value
-!   of alpha is too high
-!
-!    rcut_soft = rcut_soft_in
-!    rcut_hard = rcut_hard_in
-!    atom_sigma = atom_sigma_in
-!    dr = rcut_hard - rcut_soft
-!    N_gauss = dsqrt(2.d0/atom_sigma_in) / pi**0.25
-    rcut_soft = rcut_soft_in/rcut_hard_in
-    rcut_hard = 1.d0
-    atom_sigma = atom_sigma_in/rcut_hard_in
-    dr = 1.d0 - rcut_soft_in/rcut_hard_in
-    N_gauss = dsqrt(2.d0/atom_sigma) / pi**0.25d0
-!   *********************************************
-!
-    k = 0
-    do i = 1, n_sites
-      do j = 1, n_neigh(i)
-        k = k + 1
-!       IMPORTANT: for this basis, we skip i itself, which is neighbor number 1
-        if( j == 1 )then
-          cycle
-        end if
-        if( rjs_in(k) < rcut_hard_in .and. mask(k) )then
-          pref_f = 0.d0
-          exp_coeff_temp1 = 0.d0
-          exp_coeff_temp2 = 0.d0
-          exp_coeff_der_temp = 0.d0
-!   **************** New basis ******************
-!          rj = rjs_in(k)
-          rj = rjs_in(k)/rcut_hard_in
-!   *********************************************
-!         We leave this here because in the future atom_sigma will be rj dependent
-          atom_sigma_scaled = atom_sigma + atom_sigma_scaling*rj
-          s2 = atom_sigma_scaled**2
-          if( scaling_mode == "polynomial" )then
-!           WARNING: the 1/atom_sigma_angular^2 term is missing from these amplitudes and needs to
-!           be taken into account in the corresponding part of the code.
-!       
-!           WARNING2: These expressions here already assume rcut_hard = 1., so this parameter is missing
-!           from the expressions
-            if( amplitude_scaling == 0.d0 )then
-              amplitude = 1.d0 / atom_sigma_scaled
-              amplitude_der = - atom_sigma_scaling / s2 
-            else if( 1.d0 + 2.d0*rj**3 - 3.d0*rj**2 <= 1.d-10 )then
-              amplitude = 0.d0
-              amplitude_der = 0.d0
-            else
-              if( amplitude_scaling == 1.d0 )then
-                amplitude = 1.d0 / atom_sigma_scaled * ( 1.d0 + 2.d0*rj**3 - 3.d0*rj**2 )
-                amplitude_der = 6.d0 / atom_sigma_scaled * (rj**2 - rj) &
-                                - atom_sigma_scaling / atom_sigma_scaled * amplitude
-              else
-                amplitude = 1.d0 / atom_sigma_scaled * ( 1.d0 + 2.d0*rj**3 - 3.d0*rj**2 )**amplitude_scaling
-                amplitude_der = 6.d0*amplitude_scaling / atom_sigma_scaled * (rj**2 - rj) &
-                                * ( 1.d0 + 2.d0*rj**3 - 3.d0*rj**2 )**(amplitude_scaling - 1.d0) &
-                                - atom_sigma_scaling / atom_sigma_scaled * amplitude
-              end if
-            end if
-          end if
-!         The radial enhancement adds a scaling corresponding to the integral of a Gaussian at the position
-!         of atom j.
-          if( radial_enhancement == 1 )then
-            amplitude_der = amplitude * ( 1.d0 + dsqrt(2.d0/pi)*atom_sigma_scaling ) + &
-                            amplitude_der * ( rj + dsqrt(2.d0/pi)*atom_sigma_scaled )
-            amplitude = amplitude * ( rj + dsqrt(2.d0/pi)*atom_sigma_scaled )
-          else if( radial_enhancement == 2 )then
-            amplitude_der = amplitude*( 2.d0*rj + 2.d0*atom_sigma_scaled*atom_sigma_scaling + &
-                                        dsqrt(8.d0/pi)*atom_sigma_scaled + dsqrt(8.d0/pi)*rj*atom_sigma_scaling ) + &
-                            amplitude_der*( rj**2 + s2 + dsqrt(8.d0/pi)*atom_sigma_scaled*rj )
-            amplitude = amplitude * ( rj**2 + s2 + dsqrt(8.d0/pi)*atom_sigma_scaled*rj )
-          end if
-!         We have the recursion series starting at n = 0, which means alpha = -2
-!         However, we only need to save the expansion coefficients for alpha >= 1
-!         This is I_-1
-          I_n = 0.d0
-          N_n = 1.d0
-!         This is I_0
-          N_np1 = N_a(rcut_hard, -2)
-          I_np1 = dsqrt(pi/2.d0) * atom_sigma_scaled * ( derf( (rcut_soft-rj)/sq2/atom_sigma_scaled ) - &
-                                                  derf( (-rj)/sq2/atom_sigma_scaled ) ) / N_np1
-!         Speed up the computation of these coefficients
-          if( rcut_hard_in == rcut_soft_in )then
-            C1 = 0.d0
-          else
-            C1 = s2 / dr * dexp(-0.5d0 * (rcut_soft - rj)**2 / s2)
-          end if
-          C2 = s2 / rcut_hard * dexp(-0.5d0 * rj**2 / s2)
-!         This is different wrt the regular polynomial basis, we only go up to alpha_max-1
-          do n = -1, alpha_max_der-1
-            C1 = C1 * dr
-            C2 = C2 * rcut_hard
-            N_np2 = N_a(rcut_hard, n)
-!           This is I_alpha
-            I_np2 = s2 * dfloat(n+1) * N_n/ N_np2 * I_n &
-                    - N_np1 * (rj - rcut_hard) / N_np2 * I_np1 &
-                    + C1 / N_np2 &
-                    - C2 / N_np2
-            if(n > 0)then
-              exp_coeff_temp1(n) = I_np2
-            end if
-            N_n = N_np1
-            N_np1 = N_np2
-            I_n = I_np1
-            I_np1 = I_np2
-          end do
-!         Compute the contribution to the derivative for this part (excludes the amplitude)
-          if( do_derivatives )then
-            do n = 1, alpha_max-1
-              exp_coeff_der_temp(n) = (rj - rcut_hard)/s2 * ( atom_sigma_scaling * (rj - rcut_hard) / atom_sigma_scaled &
-                                  - 1.d0 ) * exp_coeff_temp1(n) + &
-                                 rcut_hard*N_a(rcut_hard, n+1)/s2/N_a(rcut_hard, n) * ( 2.d0 * atom_sigma_scaling &
-                                  * (rj - rcut_hard) / atom_sigma_scaled - 1.d0 ) * exp_coeff_temp1(n+1) + &
-                                 atom_sigma_scaling*rcut_hard**2*N_a(rcut_hard, n+2)/atom_sigma_scaled**3/ &
-                                  N_a(rcut_hard, n) * exp_coeff_temp1(n+2)
-            end do
-          end if
-!         If the atom is less than 4 standard deviations away from the soft cutoff, we add
-!         also this correction to the integrals. This corresponds to a Gaussian filter. We
-!         integrate between rcut_soft and rcut_hard in this case
-!
-!         This explicit ".true." or ".false." logical statement is there for debugging. For
-!         regular code use it can be set to .false.
-          if( .false. .or. (rcut_soft - rj) < 4.d0*atom_sigma_scaled )then
-            atom_sigma_f = atom_sigma_scaled * dr / nf / dsqrt(s2 + dr**2/nf**2)
-            rj_f = (s2 * rcut_soft + dr**2/nf**2*rj) / (s2 + dr**2/nf**2)
-!           We leave this here because in the future atom_sigma will be rj dependent
-            sf2 = atom_sigma_f**2
-!           The products of two Gaussians is a Gaussian, but we need to add a prefactor
-            pref_f = dexp( -0.5d0 * (rcut_soft-rj)**2 / ( s2 + dr**2/nf**2 ) )
-!           We have the recursion series starting at n = 0, which means alpha = -2
-!           However, we only need to save the expansion coefficients for alpha >= 1
-!           This is I_-1
-            I_n = 0.d0
-            N_n = 1.d0
-!           This is I_0
-            N_np1 = N_a(rcut_hard, -2)
-            I_np1 = dsqrt(pi/2.d0) * atom_sigma_f * ( derf( (rcut_hard-rj_f)/sq2/atom_sigma_f ) - &
-                                                      derf( (rcut_soft-rj_f)/sq2/atom_sigma_f ) ) / N_np1
-!           Speed up the computation of these coefficients
-            C2 = sf2 / dr * dexp(-0.5d0 * (rcut_soft - rj_f)**2 / sf2)
-!           This is different wrt the regular polynomial basis, we only go up to alpha_max-1
-            do n = -1, alpha_max_der-1
-              C2 = C2 * dr
-              N_np2 = N_a(rcut_hard, n)
-!             This is I_alpha
-              I_np2 = sf2 * dfloat(n+1) * N_n/ N_np2 * I_n &
-                      - N_np1 * (rj_f - rcut_hard) / N_np2 * I_np1 &
-                      - C2 / N_np2
-              if(n > 0)then
-                exp_coeff_temp2(n) = exp_coeff_temp2(n) + I_np2
-              end if
-              N_n = N_np1
-              N_np1 = N_np2
-              I_n = I_np1
-              I_np1 = I_np2
-            end do
-!           Compute the contribution to the derivative for this part (excludes the amplitude)
-            if( do_derivatives )then
-              denom = s2 + dr**2/nf**2
-              der_pref_f = pref_f * ( (rcut_soft - rj) / denom + (rcut_soft - rj)**2 / denom**2 * &
-                                      atom_sigma_scaled * atom_sigma_scaling )
-              der_rjf_rj = (2.d0*atom_sigma_scaled*rcut_soft*atom_sigma_scaling + dr**2/nf**2) / denom &
-                           - (s2*rcut_soft + dr**2/nf**2 * rj) * 2.d0 * atom_sigma_scaled * &
-                             atom_sigma_scaling / denom**2
-              der_sjf_rj = atom_sigma_scaling * dr/nf / dsqrt(denom) * (1.d0 - atom_sigma_scaled**2/denom)
-              do n = 1, alpha_max-1
-                exp_coeff_der_temp(n) = exp_coeff_der_temp(n) + &
-                                      pref_f * ( &
-                                      (rj_f - rcut_hard)/sf2 * ( der_sjf_rj * (rj_f - rcut_hard) / atom_sigma_f &
-                                        - der_rjf_rj ) * exp_coeff_temp2(n) + &
-                                      rcut_hard*N_a(rcut_hard, n+1)/sf2/N_a(rcut_hard, n) * ( 2.d0 * der_sjf_rj &
-                                        * (rj_f - rcut_hard) / atom_sigma_f - der_rjf_rj ) * exp_coeff_temp2(n+1) + &
-                                      der_sjf_rj*rcut_hard**2*N_a(rcut_hard, n+2)/atom_sigma_f**3/ &
-                                      N_a(rcut_hard, n) * exp_coeff_temp2(n+2) ) + &
-                                      der_pref_f * &
-                                      exp_coeff_temp2(n)
-              end do
-            end if
-          end if
-!         Now we obtain the overlap integral between the atomic density and the Gaussian centered at the origin
-!         We assume that at the soft cutoff the Gaussian basis function is approx. zero, and we only
-!         compute the overlap coefficient if the atom is close to the origin
-!         Note that the sigma for the Gaussian basis function and the atom's sigma are not the same if there is
-!         sigma scaling
-!         We reset these to zero (temp2 will stay zero since it's the filter one, and we do not apply filter to
-!         the overlap with the central Gaussian. This should be a good approximation if rcut_soft >= 4 * atom_sigma
-          exp_coeff_temp1(alpha_max) = 0.d0
-          exp_coeff_temp2(alpha_max) = 0.d0
-          if( .false. .or. rj < 4.d0*(atom_sigma+atom_sigma_scaled) )then
-              sigma_star = dsqrt(atom_sigma**2 + s2)
-              exp_coeff_temp1(alpha_max) = dexp(- 0.5d0 * rj**2 / sigma_star**2 ) * dsqrt(pi/2.d0) * &
-                                        atom_sigma_scaled*atom_sigma / sigma_star * ( 1.d0 &
-                                        + derf(atom_sigma/atom_sigma_scaled*rj/sq2/sigma_star) )* N_gauss
-            if( do_derivatives )then
-              exp_coeff_der_temp(alpha_max) = ( rj**2 * atom_sigma_scaling / atom_sigma_scaled**3 - rj/sigma_star**2 + &
-                                                atom_sigma_scaling*rj**2*atom_sigma**4/atom_sigma_scaled**3/sigma_star**4 + &
-                                                atom_sigma_scaling*atom_sigma**2/atom_sigma_scaled/sigma_star**2 - &
-                                                2.d0*rj**2*atom_sigma_scaling*atom_sigma**2/atom_sigma_scaled**3/sigma_star**2 &
-                                              ) * exp_coeff_temp1(alpha_max) + &
-                                              (1./s2 - 2.d0*rj*atom_sigma_scaling/atom_sigma_scaled**3) * s2 * atom_sigma**2 / &
-                                                sigma_star**2 * dsqrt(2.d0/atom_sigma) / pi**0.25d0 * &
-                                                dexp(-0.5d0 * rj**2 / sigma_star**2 * (1.d0 + atom_sigma**2 / s2) ) + &
-                                              dsqrt(2.d0/atom_sigma) / pi**0.25d0 * dexp(-0.5d0 * rj**2 / sigma_star**2 * &
-                                                (1.d0 + atom_sigma**2 / s2) ) * atom_sigma_scaling / atom_sigma_scaled * &
-                                                rj*atom_sigma**4/sigma_star**4
-            end if
-          end if
-!         Transform from g_alpha to g_n (the orthonormal basis)
-          if( do_derivatives )then
-            exp_coeff_der_temp(1:alpha_max) = amplitude * exp_coeff_der_temp(1:alpha_max) + amplitude_der * &
-                                              (exp_coeff_temp1(1:alpha_max) + pref_f * exp_coeff_temp2(1:alpha_max))
-            exp_coeff_der(1:alpha_max, k) = matmul( W, exp_coeff_der_temp(1:alpha_max) )
-          end if
-          exp_coeff(1:alpha_max, k) = amplitude * matmul( W, exp_coeff_temp1(1:alpha_max) + pref_f * exp_coeff_temp2(1:alpha_max) )
-        end if
-      end do
-    end do
-!   **************** New basis ******************
-!   This results from the change of variable in the
-!   overlap integrals. We only need this if we want to
-!   know the actual value of the expansion coefficients.
-!   Since this is a global factor, once we have normalized
-!   the SOAP vectors it does not have an effect anymore.
-    exp_coeff = exp_coeff * dsqrt(rcut_hard_in)
-    if( do_derivatives )then
-      exp_coeff_der = exp_coeff_der / dsqrt(rcut_hard_in)
-    end if
-!   ***********************************
-
-!   This is for debugging
-    if( .false. )then
-      open(10, file="coefficients.dat", status="unknown", access="append")
-      write(10,*) exp_coeff(1:alpha_max, 1)
-      close(10)
-      if( do_derivatives )then
-        open(10, file="derivatives.dat", status="unknown", access="append")
-        write(10,*) exp_coeff_der(1:alpha_max, 1)
-        close(10)
-      end if
-    end if
-
-    deallocate( exp_coeff_temp1, exp_coeff_temp2, exp_coeff_der_temp )
+!   IMPORTANT: for this basis we skip i itself, which is neighbor number 1. That is what
+!   do_central = .false. does in the kernel, so central_weight is never consulted.
+    call radial_expansion_kernel(n_sites, n_neigh, rjs_in, alpha_max, rcut_soft_in, rcut_hard_in, &
+                                 atom_sigma_in, atom_sigma_scaling, amplitude_scaling, nf, W, &
+                                 scaling_mode, mask, radial_enhancement, do_derivatives, &
+                                 .false., 0.d0, .true., exp_coeff, exp_coeff_der, &
+                                 exp_coeff_der2)
 
   return
   end subroutine
+!**************************************************************************
+
+
+
+
+!**************************************************************************
+!
+! Shared kernel for the poly3 and poly3gauss radial expansions.
+!
+! Structure
+! ---------
+! The mathematics is unchanged from the original scalar version; what changes
+! is the loop order.  The original walked the neighbour list one pair at a
+! time and ran the alpha recursion inside, so the innermost loop carried a
+! dependence and could not be vectorised, and every step called N_a() -- a
+! square root -- afresh.
+!
+! Here the pair list is first compacted (cutoff and mask applied once) into
+! blocks of BLK entries.  Every loop then runs over the block index, which is
+! contiguous and dependence-free, with alpha as the *outer* loop.  The alpha
+! recursion is still sequential in alpha, but each of its steps is now a
+! vector operation over BLK pairs.  The N_a ratios that appear in the
+! recursion and in the derivative are functions of alpha alone, so they are
+! tabulated once per call rather than recomputed per pair.
+!
+! The two bases differ only in how many polynomial functions there are:
+!   poly3       n_poly = alpha_max
+!   poly3gauss  n_poly = alpha_max - 1, and slot alpha_max holds the overlap
+!               with the Gaussian centred at the origin.
+!
+! Accuracy
+! --------
+! The filter recursion is seeded at alpha = -2, where (1 - r/rcut_hard)**(alpha+2)
+! equals 1 rather than 0 at r = rcut_hard, so that first step carries a
+! surface term the original dropped.  Keeping it makes exp_coeff_der agree
+! with a finite difference of exp_coeff to machine precision; dropping it
+! leaves a relative disagreement of order exp(-nf**2/2).  legacy_filter_seed
+! selects which of the two is computed -- see the module header.
+!
+  subroutine radial_expansion_kernel(n_sites, n_neigh, rjs_in, alpha_max, rcut_soft_in, &
+                                     rcut_hard_in, atom_sigma_in, atom_sigma_scaling, &
+                                     amplitude_scaling, nf, W, scaling_mode, mask, &
+                                     radial_enhancement, do_derivatives, do_central, &
+                                     central_weight, with_gauss, exp_coeff, exp_coeff_der, &
+                                     exp_coeff_der2)
+    implicit none
+
+    integer, intent(in) :: alpha_max, n_neigh(:), n_sites, radial_enhancement
+    real(dp), intent(in) :: rcut_soft_in, rcut_hard_in, rjs_in(:), atom_sigma_in, nf, atom_sigma_scaling
+    real(dp), intent(in) :: amplitude_scaling, central_weight
+    logical, intent(in) :: mask(:), do_derivatives, do_central, with_gauss
+    character(*), intent(in) :: scaling_mode
+    real(dp), intent(in) :: W(:,:)
+    real(dp), intent(inout) :: exp_coeff(:,:), exp_coeff_der(:,:)
+    real(dp), intent(inout), optional :: exp_coeff_der2(:,:)
+
+!   Pairs handled per vector block. The working set is
+!   2*(alpha_max+6)*BLK + 5*alpha_max*BLK doubles, which for the alpha_max
+!   values these bases support stays inside L1 at BLK = 64.
+    integer, parameter :: BLK = 64
+
+!   Buffers are automatic rather than allocatable so that BLK is the
+!   compile-time leading dimension: T1(b,n) then costs one shift instead of a
+!   multiply by a descriptor stride, and the b loops address contiguously.
+    real(dp) :: T1(BLK, -3:alpha_max+4), T2(BLK, -3:alpha_max+4)
+    real(dp) :: pol(BLK, alpha_max+4)
+    real(dp) :: DT(BLK, alpha_max), dtot(BLK, alpha_max)
+    real(dp) :: D2T(BLK, alpha_max), d2tot(BLK, alpha_max)
+    real(dp) :: outv(BLK, alpha_max), outd(BLK, alpha_max), outh(BLK, alpha_max)
+    real(dp) :: Nv(-3:alpha_max+4), ra(-1:alpha_max+4), rb(-1:alpha_max+4), rc(-1:alpha_max+4)
+    real(dp) :: R1(alpha_max), R2(alpha_max), R3(alpha_max), R4(alpha_max)
+    real(dp) :: Wl(alpha_max, alpha_max)
+
+    real(dp) :: rj(BLK), sig(BLK), s2(BLK), isig(BLK), is2(BLK), is3(BLK)
+    real(dp) :: amp(BLK), ampd(BLK), ampd2(BLK), acc(BLK), es(BLK), e0(BLK)
+    real(dp) :: C1(BLK), C2(BLK), den(BLK), rcp(BLK)
+    real(dp) :: pref(BLK), dpref(BLK), rjf(BLK), sgf(BLK), isgf(BLK), sf2(BLK), isf2(BLK)
+    real(dp) :: iD(BLK), sqiD(BLK), drjf(BLK), dsgf(BLK)
+    real(dp) :: ca(BLK), cb(BLK), cc(BLK)
+    real(dp) :: g0(BLK), g1(BLK), g2(BLK)
+    real(dp) :: B0(BLK), B1(BLK), B2(BLK), B3(BLK), B4(BLK)
+    logical  :: is_central(BLK), keep(BLK)
+    integer  :: idx(BLK)
+
+    integer  :: n_poly, n_hi, i, j, k, n, nb
+    real(dp) :: rcut_soft, atom_sigma, dr, inv_rcut, sqrt_rcut, inv_sqrt_rcut, inv_Nm2
+    real(dp) :: pi, sq2, sqpi2, sq2pi, sq8pi, N_gauss, sigma_sq0, isq2
+    real(dp) :: q, drnf
+    logical  :: has_filter, do_poly, do_der2, unified
+
+!   ------------------------------------------------------------------ setup
+    pi    = dacos(-1.d0)
+    sq2   = dsqrt(2.d0)
+    isq2  = 1.d0/sq2
+    sqpi2 = dsqrt(pi/2.d0)
+    sq2pi = dsqrt(2.d0/pi)
+    sq8pi = dsqrt(8.d0/pi)
+
+    do_der2 = present(exp_coeff_der2)
+    if( do_der2 .and. .not. do_derivatives )then
+      write(*,*) "ERROR: soap_turbo_radial: exp_coeff_der2 was requested without do_derivatives"
+      stop
+    end if
+!   The second derivative is built from the recurrence that the *exact*
+!   integrals satisfy. With the legacy filter seed the stored integrals are not
+!   those, so the result would be neither the derivative of what is returned
+!   nor the derivative of anything else. Refuse rather than return a number
+!   that looks plausible.
+    if( do_der2 .and. legacy_filter_seed )then
+      write(*,*) "-------------------------------------------------------------------------------"
+      write(*,*) "ERROR: second radial derivatives need soap_turbo_radial's                <---- ERROR"
+      write(*,*) "legacy_filter_seed = .false. . With the legacy seed the filter integrals are"
+      write(*,*) "not the integrals the derivative recurrence assumes, so the second derivative"
+      write(*,*) "would not be the second derivative of the coefficients that are returned."
+      write(*,*) "-------------------------------------------------------------------------------"
+      stop
+    end if
+!   With the corrected seed the whole coefficient -- plain Gaussian plus
+!   filtered Gaussian -- obeys one derivative recurrence, because the filter is
+!   a function of r alone and the rj dependence sits entirely in the Gaussian.
+!   That is both simpler and cheaper than differentiating the two pieces
+!   separately, so use it whenever it is available.
+    unified = .not. legacy_filter_seed
+
+    exp_coeff = 0.d0
+    if( do_derivatives ) exp_coeff_der = 0.d0
+    if( do_der2 ) exp_coeff_der2 = 0.d0
+
+!   **************** New basis ******************
+!   Redefine all the distances by dividing them by rcut_hard. We do this to
+!   avoid numerical instability when the value of alpha is too high. From here
+!   on rcut_hard == 1, which is why it no longer appears in the expressions.
+    inv_rcut      = 1.d0 / rcut_hard_in
+    rcut_soft     = rcut_soft_in * inv_rcut
+    atom_sigma    = atom_sigma_in * inv_rcut
+    dr            = 1.d0 - rcut_soft
+    sqrt_rcut     = dsqrt(rcut_hard_in)
+    inv_sqrt_rcut = 1.d0 / sqrt_rcut
+!   *********************************************
+
+    sigma_sq0 = atom_sigma*atom_sigma
+    N_gauss   = dsqrt(2.d0/atom_sigma) / pi**0.25d0
+
+!   A zero-width buffer (rcut_soft == rcut_hard, which read_files.f90 produces
+!   from a buffer of 0) leaves the filter Gaussian with zero width. There is
+!   nothing to integrate over [rcut_soft, rcut_hard] then, so skip the filter
+!   rather than divide by dr -- the original divided, and returned NaN for
+!   every coefficient.
+    has_filter = ( dr > 0.d0 )
+    q    = 0.d0
+    drnf = 0.d0
+    if( has_filter )then
+      drnf = dr / nf
+      q    = drnf * drnf
+    end if
+
+    if( with_gauss )then
+      n_poly = alpha_max - 1
+    else
+      n_poly = alpha_max
+    end if
+    do_poly = ( n_poly >= 1 )
+    n_hi = n_poly
+    if( do_derivatives ) n_hi = n_poly + 2
+    if( do_der2 )        n_hi = n_poly + 4
+
+!   W arrives as a slice of a larger, species-blocked matrix, so it is not
+!   contiguous. Copy it once; it is only alpha_max**2 elements.
+    Wl(1:alpha_max, 1:alpha_max) = W(1:alpha_max, 1:alpha_max)
+
+!   ------------------------------------------------- alpha-only coefficients
+!   N_a(rcut_hard=1, a) = sqrt(1/(2a+5)). The original called N_a() -- a
+!   square root -- once per alpha per pair in the recursion and four times per
+!   alpha per pair in the derivative; these are functions of alpha alone.
+!   Index -3 is the dead slot that the recursion multiplies by (n+1) = 0 on
+!   its first step; the original seeded it with 1.
+    Nv(-3) = 1.d0
+    do n = -2, alpha_max+4
+      Nv(n) = dsqrt( 1.d0 / dfloat(2*n+5) )
+    end do
+    do n = -1, n_hi
+      ra(n) = dfloat(n+1) * Nv(n-2) / Nv(n)
+      rb(n) = Nv(n-1) / Nv(n)
+      rc(n) = 1.d0 / Nv(n)
+    end do
+    ra(-1)  = 0.d0
+    inv_Nm2 = 1.d0 / Nv(-2)
+
+    if( do_derivatives .and. do_poly )then
+      do n = 1, n_poly
+        R1(n) = Nv(n+1) / Nv(n)
+        R2(n) = Nv(n+2) / Nv(n)
+      end do
+      if( do_der2 )then
+        do n = 1, n_poly
+          R3(n) = Nv(n+3) / Nv(n)
+          R4(n) = Nv(n+4) / Nv(n)
+        end do
+      end if
+    end if
+
+!   ------------------------------------------------- walk the neighbour list
+    nb = 0
+    k  = 0
+    do i = 1, n_sites
+      do j = 1, n_neigh(i)
+        k = k + 1
+        if( j == 1 .and. .not. do_central ) cycle
+        if( rjs_in(k) >= rcut_hard_in ) cycle
+        if( .not. mask(k) ) cycle
+        nb = nb + 1
+        idx(nb)        = k
+        rj(nb)         = rjs_in(k) * inv_rcut
+        is_central(nb) = ( j == 1 )
+        if( nb == BLK )then
+          call process_block()
+          nb = 0
+        end if
+      end do
+    end do
+    if( nb > 0 ) call process_block()
+
+  return
+
+  contains
+
+!   Everything below runs on the nb pairs currently gathered in idx(1:nb).
+!   Every loop over b is contiguous and free of loop-carried dependences; the
+!   alpha recursion is sequential in alpha but vector over the block.
+    subroutine process_block()
+      integer :: b, n, m, kk
+      real(dp) :: f, g, h, hp, hpp, wnm, ss2, iss, siss, ex2, aa
+      real(dp) :: is4, is5, is6, k0, k1, k2, k3, k4
+      real(dp) :: M0, M1, M2, M3, M4, pp, sc0, ge
+      logical  :: gm
+
+!     ------------------------- per-pair scalars; reciprocals in their own
+!     loop so that the divides vectorise instead of sitting in a dependence
+!     chain with the multiplies that use them
+      do b = 1, nb
+        sig(b) = atom_sigma + atom_sigma_scaling*rj(b)
+        s2(b)  = sig(b)*sig(b)
+      end do
+      do b = 1, nb
+        isig(b) = 1.d0/sig(b)
+      end do
+      do b = 1, nb
+        is2(b) = isig(b)*isig(b)
+        is3(b) = is2(b)*isig(b)
+      end do
+
+!     ------------------------------------------------------------ amplitude
+!     WARNING: the 1/atom_sigma_angular^2 term is missing from these amplitudes
+!     and needs to be taken into account in the corresponding part of the code.
+!
+!     WARNING2: these expressions already assume rcut_hard = 1, so that
+!     parameter is missing from them.
+!
+!     amplitude_scaling and scaling_mode are per-call scalars, so the branch on
+!     them is hoisted out of the block loop; the per-pair test on the cubic is a
+!     mask rather than a branch, to keep the loop vectorisable.
+!
+!     ampd2 is only filled when second derivatives are wanted. With
+!     h(rj) = 1 + 2rj^3 - 3rj^2 and sigma = sigma_0 + c*rj,
+!       a    = h^s / sigma
+!       a'   = s h^(s-1) h' / sigma - c h^s / sigma^2
+!       a''  = [s(s-1) h^(s-2) h'^2 + s h^(s-1) h''] / sigma
+!              - 2c s h^(s-1) h' / sigma^2 + 2 c^2 h^s / sigma^3
+      if( scaling_mode /= "polynomial" )then
+!       The original left amplitude and amplitude_der undefined here.
+!       read_files.f90 forces scaling_mode = "polynomial", so this branch is
+!       unreachable from an input file; an unscaled amplitude is at least a
+!       defined answer.
+        do b = 1, nb
+          amp(b)   = 1.d0
+          ampd(b)  = 0.d0
+          ampd2(b) = 0.d0
+        end do
+      else if( amplitude_scaling == 0.d0 )then
+        do b = 1, nb
+          amp(b)   = isig(b)
+          ampd(b)  = -atom_sigma_scaling*is2(b)
+          ampd2(b) = 2.d0*atom_sigma_scaling*atom_sigma_scaling*is3(b)
+        end do
+      else if( amplitude_scaling == 1.d0 )then
+        do b = 1, nb
+          h        = 1.d0 + 2.d0*rj(b)**3 - 3.d0*rj(b)**2
+          hp       = 6.d0*rj(b)**2 - 6.d0*rj(b)
+          hpp      = 12.d0*rj(b) - 6.d0
+          g        = isig(b)*h
+          amp(b)   = merge( 0.d0, g, h <= 1.d-10 )
+          ampd(b)  = merge( 0.d0, hp*isig(b) - atom_sigma_scaling*isig(b)*g, h <= 1.d-10 )
+          ampd2(b) = merge( 0.d0, hpp*isig(b) - 2.d0*atom_sigma_scaling*hp*is2(b) &
+                                  + 2.d0*atom_sigma_scaling*atom_sigma_scaling*h*is3(b), &
+                            h <= 1.d-10 )
+        end do
+      else
+        do b = 1, nb
+          h = 1.d0 + 2.d0*rj(b)**3 - 3.d0*rj(b)**2
+          if( h <= 1.d-10 )then
+            amp(b)   = 0.d0
+            ampd(b)  = 0.d0
+            ampd2(b) = 0.d0
+          else
+            hp       = 6.d0*rj(b)**2 - 6.d0*rj(b)
+            hpp      = 12.d0*rj(b) - 6.d0
+            aa       = amplitude_scaling
+            amp(b)   = isig(b) * h**aa
+            ampd(b)  = aa*h**(aa-1.d0)*hp*isig(b) - atom_sigma_scaling*isig(b)*amp(b)
+            ampd2(b) = ( aa*(aa-1.d0)*h**(aa-2.d0)*hp*hp + aa*h**(aa-1.d0)*hpp )*isig(b) &
+                       - 2.d0*atom_sigma_scaling*aa*h**(aa-1.d0)*hp*is2(b) &
+                       + 2.d0*atom_sigma_scaling*atom_sigma_scaling*h**aa*is3(b)
+          end if
+        end do
+      end if
+
+!     The central atom needs to be scaled by central_weight
+      if( do_central .and. central_weight /= 1.d0 )then
+        do b = 1, nb
+          if( is_central(b) )then
+            amp(b)   = central_weight * amp(b)
+            ampd(b)  = central_weight * ampd(b)
+            ampd2(b) = central_weight * ampd2(b)
+          end if
+        end do
+      end if
+
+!     The radial enhancement adds a scaling corresponding to the integral of a
+!     Gaussian at the position of atom j. It multiplies the amplitude by a
+!     factor m(rj), so (a m)'' = a'' m + 2 a' m' + a m''.
+      if( radial_enhancement == 1 )then
+        do b = 1, nb
+          g        = rj(b) + sq2pi*sig(b)
+          f        = 1.d0 + sq2pi*atom_sigma_scaling
+          ampd2(b) = ampd2(b)*g + 2.d0*ampd(b)*f
+          ampd(b)  = amp(b)*f + ampd(b)*g
+          amp(b)   = amp(b)*g
+        end do
+      else if( radial_enhancement == 2 )then
+        do b = 1, nb
+          g        = rj(b)**2 + s2(b) + sq8pi*sig(b)*rj(b)
+          f        = 2.d0*rj(b) + 2.d0*sig(b)*atom_sigma_scaling &
+                     + sq8pi*sig(b) + sq8pi*rj(b)*atom_sigma_scaling
+          h        = 2.d0 + 2.d0*atom_sigma_scaling*atom_sigma_scaling &
+                     + 2.d0*sq8pi*atom_sigma_scaling
+          ampd2(b) = ampd2(b)*g + 2.d0*ampd(b)*f + amp(b)*h
+          ampd(b)  = amp(b)*f + ampd(b)*g
+          amp(b)   = amp(b)*g
+        end do
+      end if
+
+!     ------------------------- overlap with the Gaussian on [0, rcut_soft]
+!     C1 is the surface term at rcut_soft, C2 the one at the origin; both pick
+!     up one more power of their cutoff per step. es and e0 are kept because the
+!     Gaussian-at-the-origin block below needs e0 again.
+      do b = 1, nb
+        es(b) = dexp( -0.5d0*(rcut_soft-rj(b))**2 * is2(b) )
+        e0(b) = dexp( -0.5d0*rj(b)**2 * is2(b) )
+      end do
+      do b = 1, nb
+        C1(b)    = s2(b)*es(b)
+        C2(b)    = s2(b)*e0(b)
+        T1(b,-3) = 0.d0
+        T1(b,-2) = sqpi2 * sig(b) * ( derf( (rcut_soft-rj(b))*isq2*isig(b) ) &
+                                    + derf( rj(b)*isq2*isig(b) ) ) * inv_Nm2
+      end do
+
+      do n = -1, n_hi
+        if( n >= 0 )then
+          do b = 1, nb
+            C1(b) = C1(b)*dr
+          end do
+        end if
+        do b = 1, nb
+          T1(b,n) = s2(b)*ra(n)*T1(b,n-2) - rb(n)*(rj(b)-1.d0)*T1(b,n-1) &
+                    + ( C1(b) - C2(b) )*rc(n)
+        end do
+      end do
+
+!     ------- legacy derivative of that piece alone (amplitude excluded)
+      if( do_derivatives .and. do_poly .and. .not. unified )then
+        do b = 1, nb
+          f     = rj(b) - 1.d0
+          g     = atom_sigma_scaling * f * isig(b)
+          ca(b) = f*is2(b)*( g - 1.d0 )
+          cb(b) = is2(b)*( 2.d0*g - 1.d0 )
+          cc(b) = atom_sigma_scaling*is3(b)
+        end do
+        do n = 1, n_poly
+          do b = 1, nb
+            DT(b,n) = ca(b)*T1(b,n) + R1(n)*cb(b)*T1(b,n+1) + R2(n)*cc(b)*T1(b,n+2)
+          end do
+        end do
+      end if
+
+!     ------------------------- Gaussian filter on [rcut_soft, rcut_hard]
+!     If the atom is less than 4 standard deviations away from the soft cutoff
+!     we add this correction to the integrals. The product of the atomic
+!     Gaussian and the filter is another Gaussian, of width sgf about rjf, times
+!     the prefactor pref.
+      if( has_filter )then
+        do b = 1, nb
+          den(b) = s2(b) + q
+        end do
+        do b = 1, nb
+          iD(b) = 1.d0/den(b)
+        end do
+        do b = 1, nb
+          sqiD(b) = dsqrt(iD(b))
+          sgf(b)  = sig(b)*drnf*sqiD(b)
+          rjf(b)  = ( s2(b)*rcut_soft + q*rj(b) )*iD(b)
+          sf2(b)  = sgf(b)*sgf(b)
+!         outside 4 sigma the original drops the whole filter contribution
+          keep(b) = ( (rcut_soft - rj(b)) < 4.d0*sig(b) )
+        end do
+        do b = 1, nb
+          isgf(b) = 1.d0/sgf(b)
+        end do
+        do b = 1, nb
+          isf2(b) = isgf(b)*isgf(b)
+          pref(b) = merge( dexp( -0.5d0*(rcut_soft-rj(b))**2 * iD(b) ), 0.d0, keep(b) )
+        end do
+
+        do b = 1, nb
+          C2(b)    = sf2(b) * dexp( -0.5d0*(rcut_soft-rjf(b))**2 * isf2(b) )
+          T2(b,-3) = 0.d0
+          T2(b,-2) = sqpi2 * sgf(b) * ( derf( (1.d0-rjf(b))*isq2*isgf(b) ) &
+                                      - derf( (rcut_soft-rjf(b))*isq2*isgf(b) ) ) * inv_Nm2
+        end do
+
+        do n = -1, n_hi
+          if( n >= 0 )then
+            do b = 1, nb
+              C2(b) = C2(b)*dr
+            end do
+          end if
+          do b = 1, nb
+            T2(b,n) = sf2(b)*ra(n)*T2(b,n-2) - rb(n)*(rjf(b)-1.d0)*T2(b,n-1) - C2(b)*rc(n)
+          end do
+          if( n == -1 .and. unified )then
+!           Surface term at r = rcut_hard. (1-r/rcut_hard)**(alpha+2) is zero
+!           there for every alpha >= -1, but this step is alpha = -2, where the
+!           exponent is 0 and the factor is 1. Dropping it is what makes the
+!           original's exp_coeff_der disagree with a central difference of its
+!           own exp_coeff.
+            do b = 1, nb
+              T2(b,-1) = T2(b,-1) + sf2(b)*dexp( -0.5d0*(1.d0-rjf(b))**2 * isf2(b) )*rc(-1)
+            end do
+          end if
+        end do
+
+!       ------- legacy derivative of the filter piece, differentiated through
+!       pref, rj_f and sigma_f separately
+        if( do_derivatives .and. do_poly .and. .not. unified )then
+          do b = 1, nb
+            f        = rcut_soft - rj(b)
+            dpref(b) = pref(b) * ( f*iD(b) + f*f*iD(b)*iD(b)*sig(b)*atom_sigma_scaling )
+            drjf(b)  = ( 2.d0*sig(b)*rcut_soft*atom_sigma_scaling + q )*iD(b) &
+                       - ( s2(b)*rcut_soft + q*rj(b) )*2.d0*sig(b)*atom_sigma_scaling*iD(b)*iD(b)
+            dsgf(b)  = atom_sigma_scaling*drnf*sqiD(b)*( 1.d0 - s2(b)*iD(b) )
+          end do
+          do b = 1, nb
+            f     = rjf(b) - 1.d0
+            g     = dsgf(b) * f * isgf(b)
+            ca(b) = pref(b) * f*isf2(b)*( g - drjf(b) )
+            cb(b) = pref(b) * isf2(b)*( 2.d0*g - drjf(b) )
+            cc(b) = pref(b) * dsgf(b)*isgf(b)*isf2(b)
+          end do
+          do n = 1, n_poly
+            do b = 1, nb
+              DT(b,n) = DT(b,n) + ca(b)*T2(b,n) + R1(n)*cb(b)*T2(b,n+1) &
+                        + R2(n)*cc(b)*T2(b,n+2) + dpref(b)*T2(b,n)
+            end do
+          end do
+        end if
+      else
+        do b = 1, nb
+          pref(b) = 0.d0
+        end do
+        do n = 1, n_hi
+          do b = 1, nb
+            T2(b,n) = 0.d0
+          end do
+        end do
+      end if
+
+!     --------------- the polynomial part of the coefficient, both pieces
+      do n = 1, n_hi
+        do b = 1, nb
+          pol(b,n) = T1(b,n) + pref(b)*T2(b,n)
+        end do
+      end do
+
+!     --------------- unified derivatives
+!     The filter is a function of r alone, so the whole rj dependence of
+!     C_alpha = int g_alpha(r) exp(-(r-rj)^2/2 sigma(rj)^2) F(r) dr sits in the
+!     Gaussian.  With u = r - rj,
+!         dG/drj   = [ u/sigma^2 + c u^2/sigma^3 ] G
+!         d2G/drj2 = [ -1/sigma^2 - 4c u/sigma^3 + (1-3c^2) u^2/sigma^4
+!                      + 2c u^3/sigma^5 + c^2 u^4/sigma^6 ] G
+!     and u^m is turned into a combination of C_(alpha+p) by
+!         (rcut_hard - r)^p g_alpha = rcut_hard^p (N_(alpha+p)/N_alpha) g_(alpha+p),
+!     writing u = (rcut_hard - rj) - (rcut_hard - r).  So one recurrence covers
+!     both pieces, and the second derivative reaches alpha+4.
+      if( do_derivatives .and. do_poly .and. unified )then
+        do b = 1, nb
+          f     = 1.d0 - rj(b)
+          g0(b) = f*is2(b) + atom_sigma_scaling*f*f*is3(b)
+          g1(b) = -( is2(b) + 2.d0*atom_sigma_scaling*f*is3(b) )
+          g2(b) = atom_sigma_scaling*is3(b)
+        end do
+        do n = 1, n_poly
+          do b = 1, nb
+            DT(b,n) = g0(b)*pol(b,n) + R1(n)*g1(b)*pol(b,n+1) + R2(n)*g2(b)*pol(b,n+2)
+          end do
+        end do
+
+        if( do_der2 )then
+          do b = 1, nb
+            f   = 1.d0 - rj(b)
+            is4 = is2(b)*is2(b)
+            is5 = is4*isig(b)
+            is6 = is4*is2(b)
+            k0  = -is2(b)
+            k1  = -4.d0*atom_sigma_scaling*is3(b)
+            k2  = ( 1.d0 - 3.d0*atom_sigma_scaling*atom_sigma_scaling )*is4
+            k3  = 2.d0*atom_sigma_scaling*is5
+            k4  = atom_sigma_scaling*atom_sigma_scaling*is6
+            B0(b) = k0 + k1*f + k2*f*f + k3*f**3 + k4*f**4
+            B1(b) = -( k1 + 2.d0*k2*f + 3.d0*k3*f*f + 4.d0*k4*f**3 )
+            B2(b) = k2 + 3.d0*k3*f + 6.d0*k4*f*f
+            B3(b) = -( k3 + 4.d0*k4*f )
+            B4(b) = k4
+          end do
+          do n = 1, n_poly
+            do b = 1, nb
+              D2T(b,n) = B0(b)*pol(b,n) + R1(n)*B1(b)*pol(b,n+1) + R2(n)*B2(b)*pol(b,n+2) &
+                         + R3(n)*B3(b)*pol(b,n+3) + R4(n)*B4(b)*pol(b,n+4)
+            end do
+          end do
+        end if
+      end if
+
+!     ------------------------- overlap with the Gaussian at the origin
+!     Only for poly3gauss, and only if the atom is close enough to the origin
+!     that the overlap is not negligible. The filter is not applied to it, which
+!     is a good approximation as long as rcut_soft >= 4*atom_sigma.
+!
+!     This one is not a polynomial, so the alpha-shift trick above does not
+!     apply. Instead the moments M_m = int phi(r) (r-rj)^m G dr obey
+!       M_m = [ sigma_0^2 sigma^2 N_gauss (-rj)^(m-1) e0
+!               - sigma^2 rj M_(m-1) + sigma_0^2 sigma^2 (m-1) M_(m-2) ] / sigma_star^2
+!     seeded by M_0, the overlap itself, and the derivatives follow from the
+!     same dG/drj and d2G/drj2 as above.
+      if( with_gauss )then
+        do b = 1, nb
+          ss2  = sigma_sq0 + s2(b)
+          iss  = 1.d0/ss2
+          siss = dsqrt(iss)
+!         beyond 4 sigma the original drops the overlap; zeroing the surface
+!         term as well keeps every moment, hence every derivative, zero too
+          gm   = ( rj(b) < 4.d0*(atom_sigma + sig(b)) )
+          ge   = merge( N_gauss*e0(b), 0.d0, gm )
+          M0   = merge( dexp( -0.5d0*rj(b)**2*iss ) * sqpi2 * sig(b)*atom_sigma*siss &
+                        * ( 1.d0 + derf( atom_sigma*isig(b)*rj(b)*isq2*siss ) ) * N_gauss, &
+                        0.d0, gm )
+          pol(b,alpha_max) = M0
+          if( do_derivatives )then
+            sc0 = sigma_sq0*s2(b)*iss
+            pp  = s2(b)*rj(b)*iss
+!           e0 is exp(-rj^2/(2 sigma^2)), which is what phi(0)*G(0) needs
+            M1 = sc0*ge - pp*M0
+            M2 = sc0*ge*(-rj(b)) - pp*M1 + sc0*M0
+            DT(b,alpha_max) = M1*is2(b) + atom_sigma_scaling*M2*is3(b)
+            if( do_der2 )then
+              M3  = sc0*ge*rj(b)**2 - pp*M2 + 2.d0*sc0*M1
+              M4  = sc0*ge*(-rj(b)**3) - pp*M3 + 3.d0*sc0*M2
+              is4 = is2(b)*is2(b)
+              is5 = is4*isig(b)
+              is6 = is4*is2(b)
+              D2T(b,alpha_max) = -M0*is2(b) - 4.d0*atom_sigma_scaling*M1*is3(b) &
+                   + ( 1.d0 - 3.d0*atom_sigma_scaling*atom_sigma_scaling )*M2*is4 &
+                   + 2.d0*atom_sigma_scaling*M3*is5 &
+                   + atom_sigma_scaling*atom_sigma_scaling*M4*is6
+            end if
+          end if
+        end do
+      end if
+
+!     ------------------------ transform from g_alpha to g_n and store
+      if( do_derivatives )then
+        do n = 1, alpha_max
+          do b = 1, nb
+            dtot(b,n) = amp(b)*DT(b,n) + ampd(b)*pol(b,n)
+          end do
+        end do
+        if( do_der2 )then
+          do n = 1, alpha_max
+            do b = 1, nb
+              d2tot(b,n) = amp(b)*D2T(b,n) + 2.d0*ampd(b)*DT(b,n) + ampd2(b)*pol(b,n)
+            end do
+          end do
+        end if
+        do n = 1, alpha_max
+          wnm = Wl(n,1)
+          do b = 1, nb
+            acc(b) = wnm*dtot(b,1)
+          end do
+          do m = 2, alpha_max
+            wnm = Wl(n,m)
+            do b = 1, nb
+              acc(b) = acc(b) + wnm*dtot(b,m)
+            end do
+          end do
+!         The original applied the 1/sqrt(rcut_hard) from the change of variable
+!         in a separate sweep over the whole array afterwards; folding it in
+!         here saves a read-modify-write pass over alpha_max*n_atom_pairs
+!         doubles.
+          do b = 1, nb
+            outd(b,n) = acc(b)*inv_sqrt_rcut
+          end do
+        end do
+        if( do_der2 )then
+          do n = 1, alpha_max
+            wnm = Wl(n,1)
+            do b = 1, nb
+              acc(b) = wnm*d2tot(b,1)
+            end do
+            do m = 2, alpha_max
+              wnm = Wl(n,m)
+              do b = 1, nb
+                acc(b) = acc(b) + wnm*d2tot(b,m)
+              end do
+            end do
+            do b = 1, nb
+              outh(b,n) = acc(b)*inv_sqrt_rcut*inv_rcut
+            end do
+          end do
+        end if
+      end if
+
+      do n = 1, alpha_max
+        wnm = Wl(n,1)
+        do b = 1, nb
+          acc(b) = wnm*pol(b,1)
+        end do
+        do m = 2, alpha_max
+          wnm = Wl(n,m)
+          do b = 1, nb
+            acc(b) = acc(b) + wnm*pol(b,m)
+          end do
+        end do
+        do b = 1, nb
+          outv(b,n) = amp(b)*acc(b)*sqrt_rcut
+        end do
+      end do
+
+!     exp_coeff(:,k) is one contiguous column per pair
+      do b = 1, nb
+        kk = idx(b)
+        do n = 1, alpha_max
+          exp_coeff(n,kk) = outv(b,n)
+        end do
+      end do
+      if( do_derivatives )then
+        do b = 1, nb
+          kk = idx(b)
+          do n = 1, alpha_max
+            exp_coeff_der(n,kk) = outd(b,n)
+          end do
+        end do
+      end if
+      if( do_der2 )then
+        do b = 1, nb
+          kk = idx(b)
+          do n = 1, alpha_max
+            exp_coeff_der2(n,kk) = outh(b,n)
+          end do
+        end do
+      end if
+
+    end subroutine process_block
+
+  end subroutine radial_expansion_kernel
 !**************************************************************************
 
 
