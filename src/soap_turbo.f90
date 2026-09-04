@@ -117,6 +117,8 @@ module soap_turbo_desc
 ! Debug dump of cnk_rad_der (see TURBOGAP_DUMP_CNK below)
  complex(c_double_complex), allocatable, target :: cnk_rad_der_dump(:,:,:)
  real(c_double), allocatable, target :: rad_exp_der_dump(:,:)
+! Debug dump of the radial expansion coefficients (see TURBOGAP_DUMP_RADIAL)
+ real(c_double), allocatable, target :: rad_exp_dump(:,:)
  complex(c_double_complex), allocatable, target :: ang_rad_der_dump(:,:)
   character(len=32) :: dump_env
  integer :: dump_len
@@ -164,6 +166,9 @@ module soap_turbo_desc
  integer(c_int), allocatable, target :: i_k2_start(:)
  integer(c_int), allocatable, target :: k2_start(:)
  integer(c_int), allocatable, target :: k2_i_site(:)
+ real(c_double), allocatable, target :: A_operator(:,:)
+ real(c_double), allocatable :: A_temp(:,:)
+ integer :: max_alpha
  integer :: n_max_prev !! NOTE CHANGING FROM SAVE BEHAVIOUR
  integer :: k_max
  integer :: n_max
@@ -239,6 +244,7 @@ module soap_turbo_desc
  type(c_ptr), intent(inout) :: alpha_max_d
  type(c_ptr), intent(inout) :: central_weight_d
  type(c_ptr) :: k2_start_d
+ type(c_ptr) :: A_operator_d
  integer(c_size_t) :: st_soap
  integer(c_size_t) :: st_soap_cart_der
  integer(c_size_t) :: st_soap_rap_der
@@ -327,6 +333,8 @@ module soap_turbo_desc
      bintybint=1000
   else if( basis == "poly3" )then
      bintybint=2000
+  else if( basis == "poly3operator" )then
+     bintybint=3000
   end if
 
   c_do_derivatives=logical( .false., kind=c_bool ) 
@@ -470,6 +478,8 @@ module soap_turbo_desc
        else if( basis == "poly3" )then
           call get_orthonormalization_matrix_poly3(alpha_max(i), S_temp, W_temp)
           ! call get_orthonormalization_matrix_poly3_gpu(alpha_max(i), c_loc(S_temp), c_loc(W_temp), cublas_handle, gpu_stream)
+       else if( basis == "poly3operator" )then
+          call get_orthonormalization_matrix_poly3_tabulated(alpha_max(i), S_temp, W_temp)
        end if
 
        S(i_beg(i):i_end(i), i_beg(i):i_end(i)) = S_temp
@@ -688,6 +698,27 @@ time2 = MPI_wtime()
   call gpu_malloc_async(n_neigh_d,st_n_sites_int,gpu_stream)
   call cpy_htod(c_loc(n_neigh),n_neigh_d, st_n_sites_int,gpu_stream)
 
+! The pair -> site map and the per-site pair offsets. Built here rather than
+! after the radial call because poly3operator needs the offsets to recognise
+! the central pair, which is the one carrying central_weight.
+  allocate(k2_i_site(1:n_atom_pairs))
+  allocate(k2_start(1:n_sites))
+
+  k2 = 0
+  do i = 1, n_sites
+    k2_start(i) = k2
+    do j = 1, n_neigh(i)
+      k2 = k2 + 1
+      k2_i_site(k2) = i
+    end do
+  end do
+
+  call gpu_malloc_async(k2_start_d,st_n_sites_int,gpu_stream)
+  call cpy_htod(c_loc(k2_start), k2_start_d, st_n_sites_int, gpu_stream)
+
+  call gpu_malloc_async(k2_i_site_d,st_n_atom_pairs_int,gpu_stream)
+  call cpy_htod(c_loc(k2_i_site),k2_i_site_d, st_n_atom_pairs_int, gpu_stream)
+
   mode = 0
   if( scaling_mode == "polynomial" ) mode =1
   if( basis == "poly3gauss" )then
@@ -715,28 +746,36 @@ time2 = MPI_wtime()
 !                                                  do_central(i), central_weight(i), &
 !                                                  radial_exp_coeff(i_beg(i):i_end(i), :), &
 !                                                  radial_exp_coeff_der(i_beg(i):i_end(i), :) )
+  else if( basis == "poly3operator" )then
+!   The atom-independent basis coefficients A, packed as (1:7, 1:n_max) so that
+!   the seven coefficients of one radial function are contiguous on the device.
+!   They depend only on alpha_max, so this costs nothing and is not cached.
+    allocate( A_operator(1:7, 1:n_max) )
+    A_operator = 0.d0
+    do i = 1, n_species
+      allocate( A_temp(1:alpha_max(i), 1:7) )
+      call get_constant_poly_coeff(alpha_max(i), 1.d0, A_temp)
+      do j = 1, alpha_max(i)
+        A_operator(1:7, i_beg(i)+j-1) = A_temp(j, 1:7)
+      end do
+      deallocate( A_temp )
+    end do
+    size_tmp_var = 7*n_max*sizeof(A_operator(1,1))
+    call gpu_malloc_async(A_operator_d, size_tmp_var, gpu_stream)
+    call cpy_htod(c_loc(A_operator), A_operator_d, size_tmp_var, gpu_stream)
+    max_alpha = maxval(alpha_max)
+
+    call gpu_radial_poly3operator(n_atom_pairs, n_species, mask_d, rjs_d, rcut_hard_d, rcut_soft_d, &
+                                  atom_sigma_r_d, atom_sigma_r_scaling_d, amplitude_scaling_d, central_weight_d, &
+                                  alpha_max_d, i_beg_d, i_end_d, k2_start_d, k2_i_site_d, A_operator_d, W_d, &
+                                  n_max, max_alpha, mode, radial_enhancement, c_do_derivatives, &
+                                  radial_exp_coeff_d, radial_exp_coeff_der_d, gpu_stream)
+
+    call gpu_free_async(A_operator_d, gpu_stream)
+    deallocate( A_operator )
   end if
 
-  allocate(k2_i_site(1:n_atom_pairs))
-  allocate(k2_start(1:n_sites))
 
-  k2 = 0
-  do i = 1, n_sites
-   k2_start(i)=k2
-    do j = 1, n_neigh(i)
-      k2 = k2 + 1
-      k2_i_site(k2)=i
-    enddo
-  enddo
-   
-  
-  call gpu_malloc_async(k2_start_d,st_n_sites_int,gpu_stream)
-  call cpy_htod(c_loc(k2_start), k2_start_d, st_n_sites_int, gpu_stream)
-
-
-  call gpu_malloc_async(k2_i_site_d,st_n_atom_pairs_int,gpu_stream)
-  call cpy_htod(c_loc(k2_i_site),k2_i_site_d, st_n_atom_pairs_int, gpu_stream)
-  
   if( do_timing )then
 #ifdef _MPIF90
     time2 = MPI_wtime()
@@ -771,6 +810,29 @@ time2 = MPI_wtime()
                                 rcut_hard_d, &
                                 k2_i_site_d, k2_start_d, &
                                 gpu_stream)
+
+! Debug: dump the radial expansion coefficients and their derivatives at full
+! precision, for a direct comparison against the CPU build. Enabled by setting
+! TURBOGAP_DUMP_RADIAL; off by default. The layout is (n_max, n_atom_pairs) on
+! both sides, so the two files are diffable line for line.
+  call get_environment_variable( "TURBOGAP_DUMP_RADIAL", dump_env, dump_len )
+  if( dump_len > 0 )then
+    allocate( rad_exp_dump(1:n_max, 1:n_atom_pairs) )
+    allocate( rad_exp_der_dump(1:n_max, 1:n_atom_pairs) )
+    call cpy_dtoh(radial_exp_coeff_d, c_loc(rad_exp_dump), st_rad_exp_coeff_der_double, gpu_stream)
+    call cpy_dtoh(radial_exp_coeff_der_d, c_loc(rad_exp_der_dump), st_rad_exp_coeff_der_double, gpu_stream)
+    call gpu_stream_sync( gpu_stream )
+    open(unit=78, file="radial_exp_coeff_dump.dat", status="unknown", position="append")
+    write(78,'(A,2I8)') "# n_atom_pairs n_max ", n_atom_pairs, n_max
+    do k2 = 1, n_atom_pairs
+      do n = 1, n_max
+        write(78,'(2I8,1X,ES26.16,1X,ES26.16,1X,ES26.16)') k2, n, rjs(k2), &
+          rad_exp_dump(n,k2), rad_exp_der_dump(n,k2)
+      end do
+    end do
+    close(78)
+    deallocate( rad_exp_dump, rad_exp_der_dump )
+  end if
 
   ! For the angular expansion the masking works differently, since we do not have a species-augmented basis as in the
   ! radial expansion part.
