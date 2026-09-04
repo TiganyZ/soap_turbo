@@ -189,6 +189,8 @@ module soap_turbo_desc
   integer :: k_max, n_max
   integer(i64) :: nb_pair
   integer :: i, counter, j, k, n_soap, k2, k3, n, l, m, np, counter2, n_soap_uncompressed, kbase
+  character(len=32) :: dump_env
+  integer :: dump_len
   logical, allocatable :: do_central(:), skip_soap_component(:,:,:), skip_soap_component_flattened(:)
   logical, allocatable, save :: skip_soap_component_flattened_prev(:)
   logical, save :: recompute_basis = .true., recompute_multiplicity_array = .true.
@@ -521,6 +523,22 @@ module soap_turbo_desc
       radial_exp_coeff_der(i_beg(i):i_end(i), :) = radial_exp_coeff_der(i_beg(i):i_end(i), :) * global_scaling(i)
     end if
   end do
+
+! Debug: dump the radial expansion coefficients and their derivatives at full
+! precision, so a GPU build can be compared against this one line for line.
+! Enabled by setting TURBOGAP_DUMP_RADIAL; off by default.
+  call get_environment_variable( "TURBOGAP_DUMP_RADIAL", dump_env, dump_len )
+  if( dump_len > 0 )then
+    open(unit=78, file="radial_exp_coeff_dump.dat", status="unknown", position="append")
+    write(78,'(A,2I8)') "# n_atom_pairs n_max ", n_atom_pairs, n_max
+    do k2 = 1, n_atom_pairs
+      do i = 1, n_max
+        write(78,'(2I8,1X,ES26.16,1X,ES26.16,1X,ES26.16)') k2, i, rjs(k2), &
+          radial_exp_coeff(i,k2), radial_exp_coeff_der(i,k2)
+      end do
+    end do
+    close(78)
+  end if
 
 
 
