@@ -531,10 +531,19 @@ module soap_turbo_desc
   if( dump_len > 0 )then
     open(unit=78, file="radial_exp_coeff_dump.dat", status="unknown", position="append")
     write(78,'(A,2I8)') "# n_atom_pairs n_max ", n_atom_pairs, n_max
+!   With do_derivatives off, radial_exp_coeff_der is a one-column dummy -- see
+!   its allocation above -- so it is only safe to index for k2 > 1 when the
+!   derivatives were actually computed. Write a zero in that column instead of
+!   reading off the end of the array.
     do k2 = 1, n_atom_pairs
       do i = 1, n_max
-        write(78,'(2I8,1X,ES26.16,1X,ES26.16,1X,ES26.16)') k2, i, rjs(k2), &
-          radial_exp_coeff(i,k2), radial_exp_coeff_der(i,k2)
+        if( do_derivatives )then
+          write(78,'(2I8,1X,ES26.16,1X,ES26.16,1X,ES26.16)') k2, i, rjs(k2), &
+            radial_exp_coeff(i,k2), radial_exp_coeff_der(i,k2)
+        else
+          write(78,'(2I8,1X,ES26.16,1X,ES26.16,1X,ES26.16)') k2, i, rjs(k2), &
+            radial_exp_coeff(i,k2), 0.d0
+        end if
       end do
     end do
     close(78)
