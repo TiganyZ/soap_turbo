@@ -183,7 +183,7 @@ module soap_turbo_desc
   real(dp) :: radial_time, angular_time, coeff_time, time3, total_time, soap_time, time1, time2, compress_time, &
             memory_time, basis_time
 
-  integer, allocatable :: i_beg(:), i_end(:)
+  integer, allocatable :: i_beg(:), i_end(:), k_first(:)
   integer, allocatable, save :: alpha_max_prev(:)
   integer, save :: n_max_prev, l_max_prev
   integer :: k_max, n_max
@@ -597,8 +597,20 @@ module soap_turbo_desc
   if( do_timing )then
     call cpu_time(time1)
   end if
+! Each site's pairs start after k_first(i), so sites are independent.
+  allocate( k_first(1:n_sites) )
   k2 = 0
   do i = 1, n_sites
+    k_first(i) = k2
+    k2 = k2 + n_neigh(i)
+  end do
+!$omp parallel do default(none) schedule(dynamic, 16) &
+!$omp shared(n_sites, n_neigh, k_first, n_max, k_max, pi, radial_exp_coeff, angular_exp_coeff, cnk, &
+!$omp        species_multiplicity, species, basis, central_weight, radial_enhancement, atom_sigma_r, &
+!$omp        rcut_hard, atom_sigma_t, i_beg, i_end, W, S) &
+!$omp private(i, j, k, k2, n, fourpi_rad, amplitude)
+  do i = 1, n_sites
+    k2 = k_first(i)
     do j = 1, n_neigh(i)
       k2 = k2 + 1
 !     The l and m loops that used to be here just enumerate k = 1, k_max in
@@ -630,6 +642,7 @@ module soap_turbo_desc
       end if
     end do
   end do
+!$omp end parallel do
 
 ! cnk_rad_der / cnk_azi_der / cnk_pol_der used to be built here. They are not
 ! built at all now: they factorise into the radial and angular expansions, and
@@ -715,6 +728,11 @@ module soap_turbo_desc
   recompute_multiplicity_array = .false.
 
 
+!$omp parallel default(none) &
+!$omp shared(n_sites, n_soap_uncompressed, skip_soap_component_flattened, n_max, l_max, cnk, &
+!$omp        multiplicity_array, compress_soap, compress_P_nonzero, compress_P_i, compress_P_j, &
+!$omp        compress_P_el, soap, n_soap, sqrt_dot_p) &
+!$omp private(this_soap, i, counter, counter2, n, np, l, kbase, acc_val, m, k, un_r, un_i, up_r, up_i)
   allocate( this_soap(1:n_soap_uncompressed) )
 ! The skipped components are the only ones the loop below does not assign, and
 ! they are never read either -- the compressed path reads this_soap only at the
@@ -724,6 +742,7 @@ module soap_turbo_desc
   do counter = 1, n_soap_uncompressed
     if( skip_soap_component_flattened(counter) ) this_soap(counter) = 0.d0
   end do
+!$omp do schedule(dynamic, 16)
   do i = 1, n_sites
     counter = 0
     counter2 = 0
@@ -770,7 +789,9 @@ module soap_turbo_desc
       sqrt_dot_p(i) = 1.d0
     end if
   end do
+!$omp end do
   deallocate( this_soap )
+!$omp end parallel
 
 
   if( do_derivatives )then
@@ -794,9 +815,14 @@ module soap_turbo_desc
 !   angles are evaluated once per pair instead of once per component
 !   expression; and the 1/sqrt_dot_p factors are reciprocals rather than
 !   n_soap divisions apiece.
-    k2 = 0
-    k3 = 0
+!$omp parallel do default(none) schedule(dynamic, 16) &
+!$omp shared(n_sites, n_neigh, k_first, sqrt_dot_p, n_soap, soap, soap_rad_der, soap_azi_der, &
+!$omp        soap_pol_der, thetas, phis, rjs, soap_cart_der) &
+!$omp private(i, j, k, k2, k3, inv_p, inv_p3, dot_r, dot_a, dot_o, sv, sin_t, cos_t, sin_f, cos_f, &
+!$omp         inv_r, cx, cy, cz, px, py, pz, ax, ay, vr, va, vo)
     do i = 1, n_sites
+      k2 = k_first(i)
+      k3 = k2 + 1
       inv_p  = 1.d0 / sqrt_dot_p(i)
       inv_p3 = 1.d0 / sqrt_dot_p(i)**3
       do j = 1, n_neigh(i)
@@ -847,6 +873,7 @@ module soap_turbo_desc
         end do
       end do
     end do
+!$omp end parallel do
 !****************************
 ! Uncomment for detailed timing check
 !
@@ -856,9 +883,11 @@ module soap_turbo_desc
   end if
 
 ! Now we normalize the soap vectors:
+!$omp parallel do default(none) shared(n_sites, n_soap, soap, sqrt_dot_p) private(i)
   do i = 1, n_sites
     soap(1:n_soap, i) = soap(1:n_soap, i) / sqrt_dot_p(i)
   end do
+!$omp end parallel do
 
 
 ! This is for debugging
@@ -922,7 +951,7 @@ module soap_turbo_desc
   end if
 
   deallocate( eimphi, preflm, plm_array, prefl, prefm, fact_array, &
-              i_beg, i_end, do_central, sqrt_dot_p )
+              i_beg, i_end, do_central, sqrt_dot_p, k_first )
   deallocate( skip_soap_component_flattened )
   if( do_derivatives )then
     deallocate( eimphi_rad_der, prefl_rad_der )
@@ -1680,12 +1709,28 @@ module soap_turbo_desc
 
     real(dp) :: P(n_max, 0:l_max), Q(n_max, 0:l_max), Qa(n_max, 0:l_max), Qo(n_max, 0:l_max)
     real(dp), allocatable :: this_rad(:), this_azi(:), this_pol(:)
+    integer, allocatable :: k_first(:)
 
     pi = dacos(-1.d0)
     fourpi = 4.d0*pi
     sq2 = dsqrt(2.d0)
     k_max = 1 + l_max*(l_max+1)/2 + l_max
 
+    allocate( k_first(1:n_sites) )
+    k2 = 0
+    do i = 1, n_sites
+      k_first(i) = k2
+      k2 = k2 + n_neigh(i)
+    end do
+
+!$omp parallel default(none) &
+!$omp shared(n_sites, n_neigh, k_first, n_max, l_max, n_soap, n_soap_uncompressed, skip, cnk, &
+!$omp        angular_exp_coeff, angular_exp_coeff_rad_der, angular_exp_coeff_azi_der, &
+!$omp        angular_exp_coeff_pol_der, radial_exp_coeff, radial_exp_coeff_der, fourpi, sq2, &
+!$omp        compress_soap, compress_P_nonzero, compress_P_i, compress_P_j, compress_P_el, &
+!$omp        soap_rad_der, soap_azi_der, soap_pol_der) &
+!$omp private(i, j, k, k2, kb, l, m, n, np, counter, base, w, cr, ci, acc_p, acc_q, acc_a, acc_o, &
+!$omp         rn, rdn, rnp, rdnp, pre, P, Q, Qa, Qo, this_rad, this_azi, this_pol)
     allocate( this_rad(1:n_soap_uncompressed) )
     allocate( this_azi(1:n_soap_uncompressed) )
     allocate( this_pol(1:n_soap_uncompressed) )
@@ -1698,8 +1743,9 @@ module soap_turbo_desc
       end if
     end do
 
-    k2 = 0
+!$omp do schedule(dynamic, 16)
     do i = 1, n_sites
+      k2 = k_first(i)
       do j = 1, n_neigh(i)
         k2 = k2 + 1
 !       j = 1 is the central atom. Its Cartesian column is built purely by
@@ -1778,8 +1824,10 @@ module soap_turbo_desc
         end if
       end do
     end do
-
+!$omp end do
     deallocate( this_rad, this_azi, this_pol )
+!$omp end parallel
+    deallocate( k_first )
 
   return
   end subroutine soap_derivatives_from_expansion

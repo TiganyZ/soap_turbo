@@ -505,8 +505,11 @@ module soap_turbo_angular
     complex(dp) :: prefm(0:)
     logical, intent(in) :: mask(:,:), do_derivatives
     real(dp), allocatable :: plm_array_der(:), plm_array_div_sin(:), plm_array_der_mul_sin(:)
+    complex(dp), allocatable :: t_eimphi(:), t_prefm(:), t_eimphi_rad_der(:)
+    real(dp), allocatable :: t_plm_array(:), t_prefl(:), t_prefl_rad_der(:)
     complex(dp) :: ec, ez
     logical :: do_this
+    integer :: n_pairs
 
     kmax = 1 + lmax*(lmax+1)/2 + lmax
     rcut2 = rcut*rcut
@@ -515,17 +518,35 @@ module soap_turbo_angular
 !   The original rebuilt them inside get_ilexp, once per neighbour pair.
     call get_semifactorial_array(fact_array, lmax)
 
+!   Pairs are independent. The Plm tables are module state built lazily, so
+!   they are built here, before the threads, and only read inside. Each thread
+!   gets its own copy of every scratch array the caller passed in.
+    call build_plm_tables(lmax+1)
+    call build_plm_der_tables(lmax)
+    kmax_der = 1 + (lmax+1)*(lmax+2)/2 + lmax+1
+    n_pairs = sum(n_neigh(1:n_sites))
+
+!$omp parallel default(none) &
+!$omp shared(n_pairs, rjs, rcut, n_species, mask, kmax, kmax_der, lmax, do_derivatives, phis, thetas, &
+!$omp        atom_sigma_in, atom_sigma_scaling, rcut2, fact_array, preflm, exp_coeff, &
+!$omp        exp_coeff_rad_der, exp_coeff_azi_der, exp_coeff_pol_der, eimphi, prefl, prefm, &
+!$omp        plm_array, eimphi_rad_der, prefl_rad_der) &
+!$omp private(k, kk, i_sp, rj, do_this, phi, theta, x, atom_sigma, amplitude, sig_fac, u, v, ec, ez, &
+!$omp         plm_array_der, plm_array_div_sin, plm_array_der_mul_sin, t_eimphi, t_prefm, &
+!$omp         t_eimphi_rad_der, t_plm_array, t_prefl, t_prefl_rad_der)
+    allocate( t_eimphi(1:size(eimphi)), t_prefm(0:size(prefm)-1), t_plm_array(1:size(plm_array)) )
+    allocate( t_prefl(0:size(prefl)-1) )
     if( do_derivatives )then
-      kmax_der = 1 + (lmax+1)*(lmax+2)/2 + lmax+1
       allocate( plm_array_der(1:kmax_der) )
       allocate( plm_array_div_sin(1:kmax) )
       allocate( plm_array_der_mul_sin(1:kmax) )
+      allocate( t_eimphi_rad_der(1:size(eimphi_rad_der)), t_prefl_rad_der(0:size(prefl_rad_der)-1) )
+    else
+      allocate( t_eimphi_rad_der(1:1), t_prefl_rad_der(0:0) )
     end if
 
-    k = 0
-    do i = 1, n_sites
-      do j = 1, n_neigh(i)
-        k = k + 1
+!$omp do schedule(dynamic, 64)
+    do k = 1, n_pairs
         rj = rjs(k)
         do_this = .false.
         if( rj < rcut )then
@@ -557,8 +578,8 @@ module soap_turbo_angular
         x = dcos(theta)
         atom_sigma = atom_sigma_in(i_sp) + atom_sigma_scaling(i_sp)*rj
         amplitude = rcut2 / atom_sigma**2
-        call get_eimphi_conjg( eimphi, prefl, prefm, fact_array, lmax, phi, rj, atom_sigma, &
-                               atom_sigma_scaling(i_sp), do_derivatives, prefl_rad_der, eimphi_rad_der )
+        call get_eimphi_conjg( t_eimphi, t_prefl, t_prefm, fact_array, lmax, phi, rj, atom_sigma, &
+                               atom_sigma_scaling(i_sp), do_derivatives, t_prefl_rad_der, t_eimphi_rad_der )
 
         if( do_derivatives )then
 !         Plm up to lmax+1; its first kmax entries are the lmax array, which is
@@ -569,26 +590,28 @@ module soap_turbo_angular
           do kk = 1, kmax
             u  = amplitude * preflm(kk)
             v  = u * plm_array_der(kk)
-            ec = v * eimphi(kk)
+            ec = v * t_eimphi(kk)
             exp_coeff(kk, k)         = ec
-            exp_coeff_rad_der(kk, k) = v * eimphi_rad_der(kk) - sig_fac * ec
+            exp_coeff_rad_der(kk, k) = v * t_eimphi_rad_der(kk) - sig_fac * ec
 !           multiplying by i is a swap and a sign, not a complex multiply
-            ez = u * plm_array_div_sin(kk) * eimphi(kk)
+            ez = u * plm_array_div_sin(kk) * t_eimphi(kk)
             exp_coeff_azi_der(kk, k) = dcmplx( -aimag(ez), dble(ez) )
-            exp_coeff_pol_der(kk, k) = u * plm_array_der_mul_sin(kk) * eimphi(kk)
+            exp_coeff_pol_der(kk, k) = u * plm_array_der_mul_sin(kk) * t_eimphi(kk)
           end do
         else
-          call get_plm_array(plm_array, lmax, x)
+          call get_plm_array(t_plm_array, lmax, x)
           do kk = 1, kmax
-            exp_coeff(kk, k) = amplitude * preflm(kk) * plm_array(kk) * eimphi(kk)
+            exp_coeff(kk, k) = amplitude * preflm(kk) * t_plm_array(kk) * t_eimphi(kk)
           end do
         end if
-      end do
     end do
+!$omp end do
 
     if( do_derivatives )then
       deallocate( plm_array_der, plm_array_div_sin, plm_array_der_mul_sin )
     end if
+    deallocate( t_eimphi, t_prefm, t_plm_array, t_prefl, t_eimphi_rad_der, t_prefl_rad_der )
+!$omp end parallel
 
   return
   end subroutine get_angular_expansion_coefficients
