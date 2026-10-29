@@ -927,25 +927,24 @@ time1 = MPI_wtime()
 
      pi = dacos(-1.d0)
 
-     st_cnk_rap_der=k_max*n_max*n_atom_pairs*sizeof(cnk_rad_der(1,1,1))
-     call gpu_malloc_async(cnk_rad_der_d,st_cnk_rap_der,gpu_stream)
-     call gpu_malloc_async(cnk_azi_der_d,st_cnk_rap_der,gpu_stream)
-     call gpu_malloc_async(cnk_pol_der_d,st_cnk_rap_der,gpu_stream)
-
-     call gpu_get_derivatives(radial_exp_coeff_d, angular_exp_coeff_d, radial_exp_coeff_der_d, &
-          angular_exp_coeff_rad_der_d, angular_exp_coeff_azi_der_d, angular_exp_coeff_pol_der_d, &
-          cnk_rad_der_d, cnk_azi_der_d, cnk_pol_der_d, &
-          rjs_d, &
-          rcut_max, &
-          n_atom_pairs, n_sites,  n_soap, k_max, n_max, l_max, gpu_stream)
-
 !    Debug: dump cnk_rad_der so it can be diffed against the CPU reference.
-!    Enabled by setting TURBOGAP_DUMP_CNK; off by default.
+!    Enabled by setting TURBOGAP_DUMP_CNK; off by default. gpu_get_soap_der
+!    builds cnk_*_der as it goes, so only this dump materialises them.
 !    The device buffer is laid out as (n_atom_pairs, k_max, n_max), i.e. the
 !    transpose of the host cnk_rad_der(k_max, n_max, n_atom_pairs), so it is
 !    received into a matching temporary and written in (k2, n, k) order.
      call get_environment_variable( "TURBOGAP_DUMP_CNK", dump_env, dump_len )
      if( dump_len > 0 )then
+       st_cnk_rap_der=k_max*n_max*n_atom_pairs*sizeof(cnk_rad_der(1,1,1))
+       call gpu_malloc_async(cnk_rad_der_d,st_cnk_rap_der,gpu_stream)
+       call gpu_malloc_async(cnk_azi_der_d,st_cnk_rap_der,gpu_stream)
+       call gpu_malloc_async(cnk_pol_der_d,st_cnk_rap_der,gpu_stream)
+       call gpu_get_derivatives(radial_exp_coeff_d, angular_exp_coeff_d, radial_exp_coeff_der_d, &
+            angular_exp_coeff_rad_der_d, angular_exp_coeff_azi_der_d, angular_exp_coeff_pol_der_d, &
+            cnk_rad_der_d, cnk_azi_der_d, cnk_pol_der_d, &
+            rjs_d, &
+            rcut_max, &
+            n_atom_pairs, n_sites,  n_soap, k_max, n_max, l_max, gpu_stream)
        allocate( cnk_rad_der_dump(1:n_atom_pairs, 1:k_max, 1:n_max) )
        call cpy_dtoh(cnk_rad_der_d, c_loc(cnk_rad_der_dump), st_cnk_rap_der, gpu_stream)
        call gpu_stream_sync( gpu_stream )
@@ -994,6 +993,9 @@ time1 = MPI_wtime()
        close(77)
 
        deallocate( rad_exp_der_dump, ang_rad_der_dump )
+       call gpu_free_async(cnk_rad_der_d,gpu_stream)
+       call gpu_free_async(cnk_azi_der_d,gpu_stream)
+       call gpu_free_async(cnk_pol_der_d,gpu_stream)
      end if
 
   end if
@@ -1120,7 +1122,8 @@ time1 = MPI_wtime()
           soap_rad_der_d, soap_azi_der_d, soap_pol_der_d, &
           thetas_d,phis_d,rjs_d, & 
           multiplicity_array_d, &
-          cnk_d, cnk_rad_der_d, cnk_azi_der_d, cnk_pol_der_d, &
+          cnk_d, radial_exp_coeff_d, radial_exp_coeff_der_d, angular_exp_coeff_d, &
+          angular_exp_coeff_rad_der_d, angular_exp_coeff_azi_der_d, angular_exp_coeff_pol_der_d, rcut_max, &
           n_neigh_d, i_k2_start_d, k2_i_site_d, k3_index_d, skip_soap_component_d, &
           n_sites, n_atom_pairs, n_soap, k_max, n_max, l_max, maxneigh, gpu_stream) 
 
@@ -1222,10 +1225,6 @@ time1 = MPI_wtime()
      call gpu_free_async(angular_exp_coeff_rad_der_d,gpu_stream)
      call gpu_free_async(angular_exp_coeff_azi_der_d,gpu_stream)
      call gpu_free_async(angular_exp_coeff_pol_der_d,gpu_stream)
-
-     call gpu_free_async(cnk_rad_der_d,gpu_stream)
-     call gpu_free_async(cnk_azi_der_d,gpu_stream)
-     call gpu_free_async(cnk_pol_der_d,gpu_stream)
 
 
   else
