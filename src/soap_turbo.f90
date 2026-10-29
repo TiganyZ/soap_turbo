@@ -1507,4 +1507,123 @@ time2 = MPI_wtime()
 !**************************************************************************
 
 
+
+!**************************************************************************
+!
+! The supercell half of assign_species_multiplicity. It depends on the
+! structure only, so a caller splitting the sites into batches computes it
+! once and passes it to assign_species_multiplicity_batch for each batch.
+!
+  subroutine get_species_supercell(species_types_soap, xyz_species_supercell, n_species_soap, &
+                                   species_supercell, species_multiplicity_supercell)
+
+    implicit none
+
+    integer, intent(in) :: n_species_soap
+    character*8, intent(in) :: species_types_soap(:)
+    character*8, intent(in) :: xyz_species_supercell(:)
+    integer, allocatable, intent(out) :: species_supercell(:,:)
+    integer, allocatable, intent(out) :: species_multiplicity_supercell(:)
+
+    integer :: max_species_multiplicity
+    integer :: n_sites_supercell
+    integer :: i
+    integer :: j
+    integer :: k
+
+    max_species_multiplicity = 0
+    do i = 1, n_species_soap
+      k = 1
+      do j = i + 1, n_species_soap
+        if( species_types_soap(i) == species_types_soap(j) )then
+          k = k + 1
+        end if
+      end do
+      max_species_multiplicity = max(max_species_multiplicity, k)
+    end do
+
+    n_sites_supercell = size(xyz_species_supercell)
+    allocate( species_supercell(1:max_species_multiplicity, 1:n_sites_supercell) )
+    allocate( species_multiplicity_supercell(1:n_sites_supercell) )
+    species_supercell = 0
+    species_multiplicity_supercell = 0
+    do i = 1, n_sites_supercell
+      do j = 1, n_species_soap
+        if( xyz_species_supercell(i) == species_types_soap(j) )then
+          species_multiplicity_supercell(i) = species_multiplicity_supercell(i) + 1
+          species_supercell(species_multiplicity_supercell(i), i) = j
+        end if
+      end do
+    end do
+
+  end subroutine
+!**************************************************************************
+
+
+
+!**************************************************************************
+!
+! assign_species_multiplicity for one batch of an all_atoms run, given what
+! get_species_supercell returned for the whole structure.
+!
+  subroutine assign_species_multiplicity_batch(max_species_multiplicity, species_types_soap, xyz_species, &
+                                               n_species_soap, n_neigh, n_atom_pairs, neighbors_list, &
+                                               species_supercell, species_multiplicity_supercell, &
+                                               mask_species, species, species_multiplicity)
+
+    implicit none
+
+    integer, intent(in) :: max_species_multiplicity
+    integer, intent(in) :: n_species_soap
+    integer, intent(in) :: n_neigh(:)
+    integer, intent(in) :: n_atom_pairs
+    integer, intent(in) :: neighbors_list(:)
+    character*8, intent(in) :: species_types_soap(:)
+    character*8, intent(in) :: xyz_species(:)
+    integer, intent(in) :: species_supercell(:,:)
+    integer, intent(in) :: species_multiplicity_supercell(:)
+    logical, allocatable, intent(out) :: mask_species(:,:)
+    integer, allocatable, intent(out) :: species(:,:)
+    integer, allocatable, intent(out) :: species_multiplicity(:)
+
+    integer :: n_sites
+    integer :: i
+    integer :: j
+    integer :: k
+    integer :: i2
+    integer :: k2
+
+    n_sites = size(xyz_species)
+    allocate( species(1:max_species_multiplicity, 1:n_sites) )
+    allocate( species_multiplicity(1:n_sites) )
+    species = 0
+    species_multiplicity = 0
+    do i = 1, n_sites
+      do j = 1, n_species_soap
+        if( xyz_species(i) == species_types_soap(j) )then
+          species_multiplicity(i) = species_multiplicity(i) + 1
+          species(species_multiplicity(i), i) = j
+        end if
+      end do
+    end do
+
+    allocate( mask_species(1:n_atom_pairs, 1:n_species_soap) )
+    mask_species = .false.
+    k2 = 0
+    do i = 1, n_sites
+      do k = 1, n_neigh(i)
+        k2 = k2 + 1
+        j = neighbors_list(k2)
+        do i2 = 1, species_multiplicity_supercell(i)
+          if( species_supercell(i2, j) > 0 )then
+            mask_species(k2, species_supercell(i2, j)) = .true.
+          end if
+        end do
+      end do
+    end do
+
+  end subroutine
+!**************************************************************************
+
+
 end module soap_turbo_desc
