@@ -60,7 +60,7 @@ module soap_turbo_desc
                       soap_d,  soap_cart_der_d, n_neigh_d,&
                       & W_d, S_d, multiplicity_array_d,&
                       & st_W_d, st_S_d, st_multiplicity_array_d,&
-                      & recompute_basis, cublas_handle , gpu_stream)
+                      & recompute_basis, cublas_handle , gpu_stream, keep_expansion)
 
     !, time_misca,time_get_rad, time_get_ang, time_get_cart)
 
@@ -88,6 +88,9 @@ module soap_turbo_desc
  integer, intent(in) :: compress_soap_indices(:)
  integer(c_int), intent(in), target :: n_neigh(:)
  logical, intent(in) :: do_derivatives
+! Keep the expansion for gpu_soap_pair_contract instead of forming soap_cart_der_d.
+ logical, intent(in), optional :: keep_expansion
+ logical :: keep
  logical, intent(in) :: do_timing
  logical, intent(in) :: compress_soap
  logical, intent(in) :: mask(:,:)
@@ -1078,7 +1081,14 @@ time1 = MPI_wtime()
                                     n_sites, n_soap, n_max,l_max, gpu_stream)
 
 
-  if( do_derivatives )then
+  keep = .false.
+  if( present(keep_expansion) ) keep = keep_expansion .and. do_derivatives
+  if( keep )then
+     call gpu_soap_keep_expansion(soap_d, sqrt_dot_p_d, cnk_d, radial_exp_coeff_d, radial_exp_coeff_der_d, &
+          angular_exp_coeff_d, angular_exp_coeff_rad_der_d, angular_exp_coeff_azi_der_d, angular_exp_coeff_pol_der_d, &
+          rjs_d, thetas_d, phis_d, k2_i_site_d, k2_start_d, n_neigh_d, multiplicity_array_d, skip_soap_component_d, &
+          rcut_max, n_sites, n_atom_pairs, n_soap, k_max, n_max, l_max, gpu_stream)
+  else if( do_derivatives )then
      !   Derivatives of the SOAP descriptor in spherical coordinates
      !****************************
      ! Uncomment for detailed timing check
@@ -1210,10 +1220,10 @@ time1 = MPI_wtime()
           eimphi_rad_der, & ! deallocate
           angular_exp_coeff_azi_der, & ! deallocate
           prefl_rad_der, & ! deallocate
-          angular_exp_coeff_pol_der, & ! deallocate
-          k3_index, & ! deallocate
-          i_k2_start) ! deallocate
+          angular_exp_coeff_pol_der)
 
+     if( .not. keep )then
+     deallocate( k3_index, i_k2_start )
 
      call gpu_free_async(i_k2_start_d,gpu_stream)
      call gpu_free_async(k3_index_d,gpu_stream)
@@ -1225,6 +1235,7 @@ time1 = MPI_wtime()
      call gpu_free_async(angular_exp_coeff_rad_der_d,gpu_stream)
      call gpu_free_async(angular_exp_coeff_azi_der_d,gpu_stream)
      call gpu_free_async(angular_exp_coeff_pol_der_d,gpu_stream)
+     end if
 
 
   else
@@ -1258,30 +1269,31 @@ time2 = MPI_wtime()
 
  call gpu_free_async(do_central_d, gpu_stream)
 
- call gpu_free_async(radial_exp_coeff_d, gpu_stream)
  call gpu_free_async(radial_exp_coeff_temp1_d, gpu_stream)
  call gpu_free_async(radial_exp_coeff_temp2_d, gpu_stream)
-
- call gpu_free_async(radial_exp_coeff_der_d,gpu_stream)
  call gpu_free_async(radial_exp_coeff_der_temp_d,gpu_stream)
 
- call gpu_free_async(angular_exp_coeff_d,gpu_stream)
- 
+! Kept ones are gpu_soap_expansion_release's to free.
+ if( .not. keep )then
+  call gpu_free_async(radial_exp_coeff_d, gpu_stream)
+  call gpu_free_async(radial_exp_coeff_der_d,gpu_stream)
+  call gpu_free_async(angular_exp_coeff_d,gpu_stream)
   call gpu_free_async(thetas_d,gpu_stream)
   call gpu_free_async(phis_d,gpu_stream)
   call gpu_free_async(rjs_d,gpu_stream)
-  call gpu_free_async(mask_d,gpu_stream)
   call gpu_free_async(k2_start_d,gpu_stream)
   call gpu_free_async(n_neigh_d,gpu_stream)
+  call gpu_free_async(k2_i_site_d,gpu_stream)
+  call gpu_free_async(sqrt_dot_p_d,gpu_stream)
+  call gpu_free_async(cnk_d, gpu_stream)
+ end if
+  call gpu_free_async(mask_d,gpu_stream)
   call gpu_free_async(species_d,gpu_stream)
   call gpu_free_async(species_multiplicity_d,gpu_stream)
-  call gpu_free_async(k2_i_site_d,gpu_stream)
   call gpu_free_async(preflm_d,gpu_stream)
   call gpu_free_async(i_beg_d,gpu_stream)
   call gpu_free_async(i_end_d,gpu_stream)
   call gpu_free_async(skip_soap_component_d,gpu_stream)
-  call gpu_free_async(sqrt_dot_p_d,gpu_stream)
-  call gpu_free_async(cnk_d, gpu_stream)
 
   ttt(2)=MPI_Wtime()
   time_get_soap=time_get_soap+ttt(2)-ttt(1)
