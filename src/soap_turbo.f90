@@ -93,9 +93,10 @@ module soap_turbo_desc
  logical :: keep
  logical, intent(in) :: do_timing
  logical, intent(in) :: compress_soap
- logical, intent(in) :: mask(:,:)
- logical(c_bool), allocatable, target :: new_mask(:,:)
- integer :: i_sp
+ logical, intent(in), target :: mask(:,:)
+ logical, allocatable :: keep_component(:)
+ type(c_ptr) :: mask_int_d
+ logical(c_bool) :: mask_elem
 
  character(*), intent(in) :: basis
  character(*), intent(in) :: scaling_mode
@@ -168,7 +169,6 @@ module soap_turbo_desc
  integer(c_int), allocatable, target :: k3_index(:)
  integer(c_int), allocatable, target :: i_k2_start(:)
  integer(c_int), allocatable, target :: k2_start(:)
- integer(c_int), allocatable, target :: k2_i_site(:)
  real(c_double), allocatable, target :: A_operator(:,:)
  real(c_double), allocatable :: A_temp(:,:)
  integer :: max_alpha
@@ -536,21 +536,25 @@ module soap_turbo_desc
 #endif
      end if
      n_soap = size(compress_soap_indices)
-     skip_soap_component = .true.
+!    Each kept index marked once, rather than searched for once per component
+!    on every batch.
+     allocate( keep_component(1:n_max*(n_max+1)/2*(l_max+1)) )
+     keep_component = .false.
+     do i = 1, n_soap
+        if( compress_soap_indices(i) >= 1 .and. compress_soap_indices(i) <= size(keep_component) )then
+           keep_component(compress_soap_indices(i)) = .true.
+        end if
+     end do
      counter = 0
      do n = 1, n_max
         do np = n, n_max
            do l = 0, l_max
               counter = counter + 1
-              do i = 1, n_soap
-                 if( compress_soap_indices(i) == counter )then
-                    skip_soap_component(l, np, n) = .false.
-                    exit
-                 end if
-              end do
+              skip_soap_component(l, np, n) = .not. keep_component(counter)
            end do
         end do
      end do
+     deallocate( keep_component )
      if( do_timing )then
 #ifdef _MPIF90
 time2 = MPI_wtime()
@@ -641,20 +645,15 @@ time2 = MPI_wtime()
      k_idx(i) = k_idx(i-1) + n_neigh(i-1)
   end do
   
-  allocate(new_mask(1:n_atom_pairs,1:n_species))
-  new_mask= logical( .false., kind=c_bool ) !.false.
-
-  do i_sp=1,n_species
-    do j=1,n_atom_pairs
-      if(mask(j,i_sp)) then
-        new_mask(j,i_sp)= logical( .true., kind=c_bool ) !.true.
-      endif
-    enddo
-  enddo
-  st_mask_d= n_atom_pairs*n_species*sizeof(new_mask(1,1))
+! Sent as Fortran logicals and made bool on the device, not converted here
+! pair by pair.
+  st_mask_d = n_atom_pairs*n_species*sizeof(mask(1,1))
+  call gpu_malloc_async(mask_int_d, st_mask_d, gpu_stream)
+  call cpy_htod(c_loc(mask), mask_int_d, st_mask_d, gpu_stream)
+  st_mask_d = n_atom_pairs*n_species*sizeof(mask_elem)
   call gpu_malloc_async(mask_d, st_mask_d, gpu_stream)
-  call cpy_htod(c_loc(new_mask), mask_d, st_mask_d, gpu_stream)
-  if( allocated( new_mask ) ) deallocate( new_mask )
+  call gpu_logical_to_bool(mask_int_d, mask_d, n_atom_pairs*n_species, gpu_stream)
+  call gpu_free_async(mask_int_d, gpu_stream)
 
   st_do_central_d= n_species*sizeof(do_central(1))
   call gpu_malloc_async(do_central_d, st_do_central_d, gpu_stream)
@@ -704,23 +703,20 @@ time2 = MPI_wtime()
 ! The pair -> site map and the per-site pair offsets. Built here rather than
 ! after the radial call because poly3operator needs the offsets to recognise
 ! the central pair, which is the one carrying central_weight.
-  allocate(k2_i_site(1:n_atom_pairs))
+! The pair -> site map is filled on the device from the offsets.
   allocate(k2_start(1:n_sites))
 
   k2 = 0
   do i = 1, n_sites
     k2_start(i) = k2
-    do j = 1, n_neigh(i)
-      k2 = k2 + 1
-      k2_i_site(k2) = i
-    end do
+    k2 = k2 + n_neigh(i)
   end do
 
   call gpu_malloc_async(k2_start_d,st_n_sites_int,gpu_stream)
   call cpy_htod(c_loc(k2_start), k2_start_d, st_n_sites_int, gpu_stream)
 
   call gpu_malloc_async(k2_i_site_d,st_n_atom_pairs_int,gpu_stream)
-  call cpy_htod(c_loc(k2_i_site),k2_i_site_d, st_n_atom_pairs_int, gpu_stream)
+  call gpu_soap_pair_site(n_sites, k2_start_d, n_neigh_d, k2_i_site_d, gpu_stream)
 
   mode = 0
   if( scaling_mode == "polynomial" ) mode =1
@@ -1201,7 +1197,6 @@ time1 = MPI_wtime()
        i_end, & ! deallocate
        do_central, & ! deallocate
        sqrt_dot_p, & ! deallocate
-       k2_i_site, & ! deallocate
        skip_soap_component, & ! deallocate
        k_idx, & ! deallocate
        k2_start)
