@@ -66,6 +66,9 @@ module soap_turbo_radial
 ! ---------------------------------------------------------------------------
   logical, public :: legacy_filter_seed = .true.
 
+! Pairs per vector block of the radial expansion; see radial_expansion_range.
+  integer, parameter, private :: radial_block = 64
+
 
 
 
@@ -292,10 +295,122 @@ module soap_turbo_radial
     real(dp), intent(inout) :: exp_coeff(:,:), exp_coeff_der(:,:)
     real(dp), intent(inout), optional :: exp_coeff_der2(:,:)
 
+!   Pairs per call of radial_expansion_range, a multiple of its block size so
+!   the blocks fall where a single serial pass would put them.
+    integer, parameter :: CHUNK = 16*radial_block
+!   The pairs that get coefficients, in neighbour-list order, and whether each
+!   is a central atom.
+    integer, allocatable :: pair_k(:)
+    logical, allocatable :: pair_central(:)
+    integer :: n_pairs, i, j, k, lo, hi
+    logical :: do_der2
+
+    do_der2 = present(exp_coeff_der2)
+    if( do_der2 .and. .not. do_derivatives )then
+      write(*,*) "ERROR: soap_turbo_radial: exp_coeff_der2 was requested without do_derivatives"
+      stop
+    end if
+!   The second derivative is built from the recurrence that the *exact*
+!   integrals satisfy. With the legacy filter seed the stored integrals are not
+!   those, so the result would be neither the derivative of what is returned
+!   nor the derivative of anything else. Refuse rather than return a number
+!   that looks plausible.
+    if( do_der2 .and. legacy_filter_seed )then
+      write(*,*) "-------------------------------------------------------------------------------"
+      write(*,*) "ERROR: second radial derivatives need soap_turbo_radial's                <---- ERROR"
+      write(*,*) "legacy_filter_seed = .false. . With the legacy seed the filter integrals are"
+      write(*,*) "not the integrals the derivative recurrence assumes, so the second derivative"
+      write(*,*) "would not be the second derivative of the coefficients that are returned."
+      write(*,*) "-------------------------------------------------------------------------------"
+      stop
+    end if
+
+!$omp parallel do default(shared) schedule(static) private(k)
+    do k = 1, size(exp_coeff, 2)
+      exp_coeff(:, k) = 0.d0
+    end do
+!$omp end parallel do
+    if( do_derivatives )then
+!$omp parallel do default(shared) schedule(static) private(k)
+      do k = 1, size(exp_coeff_der, 2)
+        exp_coeff_der(:, k) = 0.d0
+      end do
+!$omp end parallel do
+    end if
+    if( do_der2 ) exp_coeff_der2 = 0.d0
+
+    allocate( pair_k(1:size(rjs_in)), pair_central(1:size(rjs_in)) )
+    n_pairs = 0
+    k = 0
+    do i = 1, n_sites
+      do j = 1, n_neigh(i)
+        k = k + 1
+        if( j == 1 .and. .not. do_central ) cycle
+        if( rjs_in(k) >= rcut_hard_in ) cycle
+        if( .not. mask(k) ) cycle
+        n_pairs = n_pairs + 1
+        pair_k(n_pairs)       = k
+        pair_central(n_pairs) = ( j == 1 )
+      end do
+    end do
+
+!   Each chunk writes only its own pairs' columns, and each call has its own
+!   block buffers.
+    if( do_der2 )then
+!$omp parallel do default(shared) schedule(dynamic, 1) private(lo, hi)
+      do lo = 1, n_pairs, CHUNK
+        hi = min(lo + CHUNK - 1, n_pairs)
+        call radial_expansion_range(rjs_in, alpha_max, rcut_soft_in, rcut_hard_in, atom_sigma_in, &
+                                    atom_sigma_scaling, amplitude_scaling, nf, W, scaling_mode, &
+                                    radial_enhancement, do_derivatives, do_central, central_weight, &
+                                    with_gauss, pair_k, pair_central, lo, hi, exp_coeff, exp_coeff_der, &
+                                    exp_coeff_der2)
+      end do
+!$omp end parallel do
+    else
+!$omp parallel do default(shared) schedule(dynamic, 1) private(lo, hi)
+      do lo = 1, n_pairs, CHUNK
+        hi = min(lo + CHUNK - 1, n_pairs)
+        call radial_expansion_range(rjs_in, alpha_max, rcut_soft_in, rcut_hard_in, atom_sigma_in, &
+                                    atom_sigma_scaling, amplitude_scaling, nf, W, scaling_mode, &
+                                    radial_enhancement, do_derivatives, do_central, central_weight, &
+                                    with_gauss, pair_k, pair_central, lo, hi, exp_coeff, exp_coeff_der)
+      end do
+!$omp end parallel do
+    end if
+
+    deallocate( pair_k, pair_central )
+
+  end subroutine radial_expansion_kernel
+!**************************************************************************
+
+
+
+!**************************************************************************
+!
+! Coefficients of the compacted pairs pair_k(first_pair:last_pair), in blocks
+! of BLK cut from first_pair on. The caller has zeroed the output arrays.
+!
+  subroutine radial_expansion_range(rjs_in, alpha_max, rcut_soft_in, rcut_hard_in, atom_sigma_in, &
+                                    atom_sigma_scaling, amplitude_scaling, nf, W, scaling_mode, &
+                                    radial_enhancement, do_derivatives, do_central, central_weight, &
+                                    with_gauss, pair_k, pair_central, first_pair, last_pair, &
+                                    exp_coeff, exp_coeff_der, exp_coeff_der2)
+    implicit none
+
+    integer, intent(in) :: alpha_max, radial_enhancement, pair_k(:), first_pair, last_pair
+    real(dp), intent(in) :: rcut_soft_in, rcut_hard_in, rjs_in(:), atom_sigma_in, nf, atom_sigma_scaling
+    real(dp), intent(in) :: amplitude_scaling, central_weight
+    logical, intent(in) :: pair_central(:), do_derivatives, do_central, with_gauss
+    character(*), intent(in) :: scaling_mode
+    real(dp), intent(in) :: W(:,:)
+    real(dp), intent(inout) :: exp_coeff(:,:), exp_coeff_der(:,:)
+    real(dp), intent(inout), optional :: exp_coeff_der2(:,:)
+
 !   Pairs handled per vector block. The working set is
 !   2*(alpha_max+6)*BLK + 5*alpha_max*BLK doubles, which for the alpha_max
 !   values these bases support stays inside L1 at BLK = 64.
-    integer, parameter :: BLK = 64
+    integer, parameter :: BLK = radial_block
 
 !   Buffers are automatic rather than allocatable so that BLK is the
 !   compile-time leading dimension: T1(b,n) then costs one shift instead of a
@@ -320,7 +435,7 @@ module soap_turbo_radial
     logical  :: is_central(BLK), keep(BLK)
     integer  :: idx(BLK)
 
-    integer  :: n_poly, n_hi, i, j, k, n, nb
+    integer  :: n_poly, n_hi, k, n, nb, p
     real(dp) :: rcut_soft, atom_sigma, dr, inv_rcut, sqrt_rcut, inv_sqrt_rcut, inv_Nm2
     real(dp) :: pi, sq2, sqpi2, sq2pi, sq8pi, N_gauss, sigma_sq0, isq2
     real(dp) :: q, drnf
@@ -335,34 +450,7 @@ module soap_turbo_radial
     sq8pi = dsqrt(8.d0/pi)
 
     do_der2 = present(exp_coeff_der2)
-    if( do_der2 .and. .not. do_derivatives )then
-      write(*,*) "ERROR: soap_turbo_radial: exp_coeff_der2 was requested without do_derivatives"
-      stop
-    end if
-!   The second derivative is built from the recurrence that the *exact*
-!   integrals satisfy. With the legacy filter seed the stored integrals are not
-!   those, so the result would be neither the derivative of what is returned
-!   nor the derivative of anything else. Refuse rather than return a number
-!   that looks plausible.
-    if( do_der2 .and. legacy_filter_seed )then
-      write(*,*) "-------------------------------------------------------------------------------"
-      write(*,*) "ERROR: second radial derivatives need soap_turbo_radial's                <---- ERROR"
-      write(*,*) "legacy_filter_seed = .false. . With the legacy seed the filter integrals are"
-      write(*,*) "not the integrals the derivative recurrence assumes, so the second derivative"
-      write(*,*) "would not be the second derivative of the coefficients that are returned."
-      write(*,*) "-------------------------------------------------------------------------------"
-      stop
-    end if
-!   With the corrected seed the whole coefficient -- plain Gaussian plus
-!   filtered Gaussian -- obeys one derivative recurrence, because the filter is
-!   a function of r alone and the rj dependence sits entirely in the Gaussian.
-!   That is both simpler and cheaper than differentiating the two pieces
-!   separately, so use it whenever it is available.
     unified = .not. legacy_filter_seed
-
-    exp_coeff = 0.d0
-    if( do_derivatives ) exp_coeff_der = 0.d0
-    if( do_der2 ) exp_coeff_der2 = 0.d0
 
 !   **************** New basis ******************
 !   Redefine all the distances by dividing them by rcut_hard. We do this to
@@ -437,24 +525,18 @@ module soap_turbo_radial
       end if
     end if
 
-!   ------------------------------------------------- walk the neighbour list
+!   ------------------------------------------------- walk this range of pairs
     nb = 0
-    k  = 0
-    do i = 1, n_sites
-      do j = 1, n_neigh(i)
-        k = k + 1
-        if( j == 1 .and. .not. do_central ) cycle
-        if( rjs_in(k) >= rcut_hard_in ) cycle
-        if( .not. mask(k) ) cycle
-        nb = nb + 1
-        idx(nb)        = k
-        rj(nb)         = rjs_in(k) * inv_rcut
-        is_central(nb) = ( j == 1 )
-        if( nb == BLK )then
-          call process_block()
-          nb = 0
-        end if
-      end do
+    do p = first_pair, last_pair
+      k = pair_k(p)
+      nb = nb + 1
+      idx(nb)        = k
+      rj(nb)         = rjs_in(k) * inv_rcut
+      is_central(nb) = pair_central(p)
+      if( nb == BLK )then
+        call process_block()
+        nb = 0
+      end if
     end do
     if( nb > 0 ) call process_block()
 
@@ -919,7 +1001,7 @@ module soap_turbo_radial
 
     end subroutine process_block
 
-  end subroutine radial_expansion_kernel
+  end subroutine radial_expansion_range
 !**************************************************************************
 
 
