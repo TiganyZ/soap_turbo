@@ -94,6 +94,16 @@ module soap_turbo_desc
   integer,  save, private :: hs_n_sites = 0, hs_n_pairs = 0, hs_n_max = 0, hs_k_max = 0
   integer,  save, private :: hs_l_max = -1, hs_n_soap = 0
 
+! What soap_contract needs from the last get_soap called with contract on. The
+! expansion and its derivatives stay in the work buffers above; these are the
+! rest: the norm, which components survive compression, and the geometry.
+  logical,  save, private :: ct_ready = .false., ct_compress = .false.
+  integer,  save, private :: ct_n_sites = 0, ct_n_pairs = 0, ct_n_max = 0, ct_k_max = 0, ct_l_max = -1
+  integer,  save, private :: ct_n_soap = 0, ct_n_soap_unc = 0, ct_P_nonzero = 0
+  real(dp), allocatable, save, private :: ct_sqrt_dot_p(:), ct_rjs(:), ct_thetas(:), ct_phis(:), ct_P_el(:)
+  integer,  allocatable, save, private :: ct_n_neigh(:), ct_P_i(:), ct_P_j(:)
+  logical,  allocatable, save, private :: ct_skip(:)
+
   contains
 
 !**************************************************************************
@@ -131,7 +141,7 @@ module soap_turbo_desc
                       atom_sigma_r_scaling, atom_sigma_t, atom_sigma_t_scaling, &
                       amplitude_scaling, radial_enhancement, central_weight, basis, scaling_mode, do_timing, &
                       do_derivatives, compress_soap, compress_P_nonzero, compress_P_i, compress_P_j, &
-                      compress_P_el, soap, soap_cart_der)
+                      compress_P_el, soap, soap_cart_der, contract)
 
   implicit none
 
@@ -151,6 +161,10 @@ module soap_turbo_desc
 
   character(*), intent(in) :: basis, scaling_mode
 
+! With derivatives, keep the expansion for soap_contract instead of forming
+! soap_cart_der, which is then not touched.
+  logical, intent(in), optional :: contract
+
 ! Output variables
   real(dp), intent(inout) :: soap(:,:), soap_cart_der(:,:,:)
 !-------------------
@@ -169,7 +183,7 @@ module soap_turbo_desc
   real(dp), allocatable :: W_temp(:,:), S_temp(:,:)
   real(dp), pointer, contiguous :: radial_exp_coeff(:,:), radial_exp_coeff_der(:,:)
   real(dp), pointer, contiguous :: radial_exp_coeff_der2(:,:)
-  logical :: do_hessian
+  logical :: do_hessian, do_contract
   real(dp), allocatable :: preflm(:), plm_array(:), prefl(:), fact_array(:), prefl_rad_der(:)
   real(dp), allocatable :: this_soap(:)
   real(dp) :: amplitude, multiplicity, pi, rcut_max, fourpi_rad
@@ -196,6 +210,9 @@ module soap_turbo_desc
   logical, save :: recompute_basis = .true., recompute_multiplicity_array = .true.
   character*64, save :: basis_prev = "None"
 !-------------------
+
+  do_contract = .false.
+  if( present(contract) ) do_contract = contract .and. do_derivatives
 
   if( do_timing )then
     call cpu_time(time3)
@@ -424,16 +441,18 @@ module soap_turbo_desc
     call ensure_complex_buffer( wc_ang_rad,  int(k_max,i64)*nb_pair )
     call ensure_complex_buffer( wc_ang_azi,  int(k_max,i64)*nb_pair )
     call ensure_complex_buffer( wc_ang_pol,  int(k_max,i64)*nb_pair )
-    call ensure_real_buffer   ( wr_soap_rad, int(n_soap,i64)*nb_pair )
-    call ensure_real_buffer   ( wr_soap_azi, int(n_soap,i64)*nb_pair )
-    call ensure_real_buffer   ( wr_soap_pol, int(n_soap,i64)*nb_pair )
     radial_exp_coeff_der     (1:n_max, 1:n_atom_pairs)        => wr_rad_der (1:int(n_max,i64)*nb_pair)
     angular_exp_coeff_rad_der(1:k_max, 1:n_atom_pairs)        => wc_ang_rad (1:int(k_max,i64)*nb_pair)
     angular_exp_coeff_azi_der(1:k_max, 1:n_atom_pairs)        => wc_ang_azi (1:int(k_max,i64)*nb_pair)
     angular_exp_coeff_pol_der(1:k_max, 1:n_atom_pairs)        => wc_ang_pol (1:int(k_max,i64)*nb_pair)
-    soap_rad_der(1:n_soap, 1:n_atom_pairs)                    => wr_soap_rad(1:int(n_soap,i64)*nb_pair)
-    soap_azi_der(1:n_soap, 1:n_atom_pairs)                    => wr_soap_azi(1:int(n_soap,i64)*nb_pair)
-    soap_pol_der(1:n_soap, 1:n_atom_pairs)                    => wr_soap_pol(1:int(n_soap,i64)*nb_pair)
+    if( .not. do_contract )then
+      call ensure_real_buffer   ( wr_soap_rad, int(n_soap,i64)*nb_pair )
+      call ensure_real_buffer   ( wr_soap_azi, int(n_soap,i64)*nb_pair )
+      call ensure_real_buffer   ( wr_soap_pol, int(n_soap,i64)*nb_pair )
+      soap_rad_der(1:n_soap, 1:n_atom_pairs)                  => wr_soap_rad(1:int(n_soap,i64)*nb_pair)
+      soap_azi_der(1:n_soap, 1:n_atom_pairs)                  => wr_soap_azi(1:int(n_soap,i64)*nb_pair)
+      soap_pol_der(1:n_soap, 1:n_atom_pairs)                  => wr_soap_pol(1:int(n_soap,i64)*nb_pair)
+    end if
     if( do_hessian )then
       call ensure_real_buffer( wr_rad_der2, int(n_max,i64)*nb_pair )
       radial_exp_coeff_der2(1:n_max, 1:n_atom_pairs)          => wr_rad_der2(1:int(n_max,i64)*nb_pair)
@@ -794,7 +813,7 @@ module soap_turbo_desc
 !$omp end parallel
 
 
-  if( do_derivatives )then
+  if( do_derivatives .and. .not. do_contract )then
 !   Derivatives of the SOAP descriptor in spherical coordinates
 !****************************
 ! Uncomment for detailed timing check
@@ -950,6 +969,12 @@ module soap_turbo_desc
     hs_ready   = .true.
   end if
 
+  if( do_contract )then
+    call keep_for_contract()
+  else
+    ct_ready = .false.
+  end if
+
   deallocate( eimphi, preflm, plm_array, prefl, prefm, fact_array, &
               i_beg, i_end, do_central, sqrt_dot_p, k_first )
   deallocate( skip_soap_component_flattened )
@@ -977,6 +1002,37 @@ module soap_turbo_desc
     write(*,*)'                                       |'
     write(*,*)'.......................................|'
   end if
+
+  contains
+
+    subroutine keep_for_contract()
+      ct_n_sites    = n_sites
+      ct_n_pairs    = n_atom_pairs
+      ct_n_max      = n_max
+      ct_k_max      = k_max
+      ct_l_max      = l_max
+      ct_n_soap     = n_soap
+      ct_n_soap_unc = n_soap_uncompressed
+      ct_compress   = compress_soap
+      ct_P_nonzero  = compress_P_nonzero
+      if( allocated(ct_sqrt_dot_p) ) deallocate( ct_sqrt_dot_p, ct_rjs, ct_thetas, ct_phis, ct_n_neigh, ct_skip )
+      allocate( ct_sqrt_dot_p(1:n_sites), ct_rjs(1:n_atom_pairs), ct_thetas(1:n_atom_pairs), &
+                ct_phis(1:n_atom_pairs), ct_n_neigh(1:n_sites), ct_skip(1:n_soap_uncompressed) )
+      ct_sqrt_dot_p = sqrt_dot_p(1:n_sites)
+      ct_rjs        = rjs(1:n_atom_pairs)
+      ct_thetas     = thetas(1:n_atom_pairs)
+      ct_phis       = phis(1:n_atom_pairs)
+      ct_n_neigh    = n_neigh(1:n_sites)
+      ct_skip       = skip_soap_component_flattened
+      if( allocated(ct_P_el) ) deallocate( ct_P_el, ct_P_i, ct_P_j )
+      if( compress_soap )then
+        allocate( ct_P_el(1:compress_P_nonzero), ct_P_i(1:compress_P_nonzero), ct_P_j(1:compress_P_nonzero) )
+        ct_P_el = compress_P_el(1:compress_P_nonzero)
+        ct_P_i  = compress_P_i(1:compress_P_nonzero)
+        ct_P_j  = compress_P_j(1:compress_P_nonzero)
+      end if
+      ct_ready = .true.
+    end subroutine keep_for_contract
 
   end subroutine get_soap
 !**************************************************************************
@@ -1642,6 +1698,192 @@ module soap_turbo_desc
     end subroutine pair_geometry
 
   end subroutine get_soap_central_hessian
+
+
+!**************************************************************************
+!
+! pair(1:3, k) = sgn * sum_s G(i, s) * soap_cart_der(1:3, s, k), i the site of
+! pair k, for G(n_sites, n_soap) a gradient with respect to the normalised
+! descriptor -- without forming soap_cart_der. get_soap must have been called
+! with contract = .true. just before; this reads what it kept.
+!
+! Through the normalisation q = p/|p|, G becomes Gp = (G - q (q.G)) / |p|, and
+! through the compression it goes back to the uncompressed components. In the
+! terms of soap_derivatives_from_expansion, each of those is
+!   4pi base(n,np) [ r'(n) P(np,l) + r(n) Q(np,l) + r'(np) P(n,l) + r(np) Q(n,l) ]
+! for the radial derivative, and likewise for the two angles. Writing
+! Y(n,np,l) = Gp_unc(n,np,l) base(n,np), symmetric and doubled on the diagonal,
+! the sum over components becomes
+!   4pi sum_n sum_k w(m) [ r'(n) Re(A(k) H*(k,n)) + r(n) Re(A_r(k) H*(k,n)) ]
+! with H(k,n) = sum_np Y(n,np,l) cnk(k,np), one complex vector per site. So a
+! pair costs n_max*k_max products against H instead of a pass over n_soap
+! components, and the (3, n_soap, n_pairs) array is never written. Same
+! derivative as soap_cart_der, summed in a different order.
+!
+  subroutine soap_contract(soap, G, sgn, pair)
+
+    implicit none
+
+    real(dp), intent(in) :: soap(:,:)
+    real(dp), intent(in) :: G(:,:)
+    real(dp), intent(in) :: sgn
+    real(dp), intent(out) :: pair(:,:)
+
+    complex(dp), pointer, contiguous :: cnk(:,:,:), A(:,:), A_r(:,:), A_a(:,:), A_p(:,:)
+    real(dp), pointer, contiguous :: r(:,:), rd(:,:)
+    complex(dp), allocatable :: H(:,:)
+    real(dp), allocatable :: Gp(:), Gu(:), Y(:,:,:)
+    integer, allocatable :: k_first(:)
+    real(dp) :: fourpi, sq2, base, w, x, qg, inv, hr, hi
+    real(dp) :: sd, sr, sa, so, f_rad, f_azi, f_pol
+    real(dp) :: sin_t, cos_t, sin_f, cos_f, inv_r
+    complex(dp) :: hsum
+    integer :: i, j, k, k2, k3, kb, l, m, n, np, counter, n_max, k_max, l_max, n_soap, n_pairs
+    integer(i64) :: nb_pair
+
+    if( .not. ct_ready )then
+      write(*,*) "ERROR: soap_contract needs get_soap called with contract = .true. first"
+      stop
+    end if
+
+    n_max   = ct_n_max
+    k_max   = ct_k_max
+    l_max   = ct_l_max
+    n_soap  = ct_n_soap
+    n_pairs = ct_n_pairs
+    nb_pair = int(n_pairs, i64)
+    cnk(1:k_max, 1:n_max, 1:ct_n_sites) => wc_cnk(1:int(k_max,i64)*int(n_max,i64)*int(ct_n_sites,i64))
+    A  (1:k_max, 1:n_pairs) => wc_ang    (1:int(k_max,i64)*nb_pair)
+    A_r(1:k_max, 1:n_pairs) => wc_ang_rad(1:int(k_max,i64)*nb_pair)
+    A_a(1:k_max, 1:n_pairs) => wc_ang_azi(1:int(k_max,i64)*nb_pair)
+    A_p(1:k_max, 1:n_pairs) => wc_ang_pol(1:int(k_max,i64)*nb_pair)
+    r  (1:n_max, 1:n_pairs) => wr_rad    (1:int(n_max,i64)*nb_pair)
+    rd (1:n_max, 1:n_pairs) => wr_rad_der(1:int(n_max,i64)*nb_pair)
+
+    fourpi = 4.d0*dacos(-1.d0)
+    sq2 = dsqrt(2.d0)
+
+    allocate( k_first(1:ct_n_sites) )
+    k2 = 0
+    do i = 1, ct_n_sites
+      k_first(i) = k2
+      k2 = k2 + ct_n_neigh(i)
+    end do
+
+!$omp parallel default(none) &
+!$omp shared(soap, G, sgn, pair, cnk, A, A_r, A_a, A_p, r, rd, k_first, n_max, k_max, l_max, n_soap, &
+!$omp        fourpi, sq2, ct_n_sites, ct_n_neigh, ct_sqrt_dot_p, ct_compress, ct_P_nonzero, ct_P_i, ct_P_j, &
+!$omp        ct_P_el, ct_skip, ct_n_soap_unc, ct_rjs, ct_thetas, ct_phis) &
+!$omp private(i, j, k, k2, k3, kb, l, m, n, np, counter, base, w, x, qg, inv, hr, hi, hsum, sd, sr, sa, so, &
+!$omp         f_rad, f_azi, f_pol, sin_t, cos_t, sin_f, cos_f, inv_r, Gp, Gu, Y, H)
+    allocate( Gp(1:n_soap), Gu(1:ct_n_soap_unc), Y(1:n_max, 1:n_max, 0:l_max), H(1:k_max, 1:n_max) )
+!$omp do schedule(dynamic, 16)
+    do i = 1, ct_n_sites
+!     ---- back through the normalisation and the compression
+      qg = 0.d0
+      do k = 1, n_soap
+        qg = qg + soap(k, i)*G(i, k)
+      end do
+      inv = 1.d0 / ct_sqrt_dot_p(i)
+      do k = 1, n_soap
+        Gp(k) = (G(i, k) - soap(k, i)*qg)*inv
+      end do
+      if( ct_compress )then
+        Gu = 0.d0
+        do k = 1, ct_P_nonzero
+          Gu(ct_P_j(k)) = Gu(ct_P_j(k)) + ct_P_el(k)*Gp(ct_P_i(k))
+        end do
+      else
+        Gu(1:n_soap) = Gp(1:n_soap)
+      end if
+
+!     ---- Y(n,np,l), symmetric, doubled on the diagonal
+      counter = 0
+      do n = 1, n_max
+        do np = n, n_max
+          base = sq2
+          if( n == np ) base = 1.d0
+          do l = 0, l_max
+            counter = counter + 1
+            x = 0.d0
+            if( .not. ct_skip(counter) ) x = Gu(counter)*base
+            if( n == np )then
+              Y(n, n, l) = 2.d0*x
+            else
+              Y(n, np, l) = x
+              Y(np, n, l) = x
+            end if
+          end do
+        end do
+      end do
+
+!     ---- H(k,n) = w(m) sum_np Y(n,np,l) cnk(k,np)
+      do n = 1, n_max
+        do l = 0, l_max
+          kb = 1 + l*(l+1)/2
+          do m = 0, l
+            k = kb + m
+            hsum = (0.d0, 0.d0)
+            do np = 1, n_max
+              hsum = hsum + Y(n, np, l)*cnk(k, np, i)
+            end do
+            w = 2.d0
+            if( m == 0 ) w = 1.d0
+            H(k, n) = w*hsum
+          end do
+        end do
+      end do
+
+!     ---- each pair against H, then to Cartesian; the central pair is minus
+!     the sum of the others, as soap_cart_der's is
+      k2 = k_first(i)
+      k3 = k2 + 1
+      pair(1:3, k3) = 0.d0
+      do j = 2, ct_n_neigh(i)
+        k2 = k_first(i) + j
+        f_rad = 0.d0
+        f_azi = 0.d0
+        f_pol = 0.d0
+        do n = 1, n_max
+          sd = 0.d0
+          sr = 0.d0
+          sa = 0.d0
+          so = 0.d0
+          do k = 1, k_max
+            hr = dble(H(k, n))
+            hi = aimag(H(k, n))
+            sd = sd + dble(A  (k, k2))*hr + aimag(A  (k, k2))*hi
+            sr = sr + dble(A_r(k, k2))*hr + aimag(A_r(k, k2))*hi
+            sa = sa + dble(A_a(k, k2))*hr + aimag(A_a(k, k2))*hi
+            so = so + dble(A_p(k, k2))*hr + aimag(A_p(k, k2))*hi
+          end do
+          f_rad = f_rad + rd(n, k2)*sd + r(n, k2)*sr
+          f_azi = f_azi + r(n, k2)*sa
+          f_pol = f_pol + r(n, k2)*so
+        end do
+        f_rad = fourpi*f_rad
+        f_azi = fourpi*f_azi
+        f_pol = fourpi*f_pol
+        sin_t = dsin(ct_thetas(k2))
+        cos_t = dcos(ct_thetas(k2))
+        sin_f = dsin(ct_phis(k2))
+        cos_f = dcos(ct_phis(k2))
+        inv_r = 1.d0 / ct_rjs(k2)
+        pair(1, k2) = sgn*( sin_t*cos_f*f_rad - cos_t*cos_f*inv_r*f_pol - sin_f*inv_r*f_azi )
+        pair(2, k2) = sgn*( sin_t*sin_f*f_rad - cos_t*sin_f*inv_r*f_pol + cos_f*inv_r*f_azi )
+        pair(3, k2) = sgn*( cos_t*f_rad + sin_t*inv_r*f_pol )
+        pair(1:3, k3) = pair(1:3, k3) - pair(1:3, k2)
+      end do
+    end do
+!$omp end do
+    deallocate( Gp, Gu, Y, H )
+!$omp end parallel
+
+    deallocate( k_first )
+
+  end subroutine soap_contract
+!**************************************************************************
+
 
 
 !**************************************************************************
